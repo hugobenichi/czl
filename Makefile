@@ -6,7 +6,7 @@ builddir:
 	mkdir -p $(OUTDIR)
 
 $(OUTDIR)/czl: *.c
-	gcc -std=c99 -Os -o $@ $<
+	gcc -Wall -std=c99 -Os -o $@ $<
 
 build: builddir $(OUTDIR)/czl
 

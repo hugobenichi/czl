@@ -17,17 +17,112 @@
 #define _source_loc() __FILE__ ":" _stringize(__LINE__)
 
 #define _local static
+#define _global static
 
 
+// Standard int types
 #include <stdint.h>
-#define i8    int8_t
-#define i16   int16_t
-#define i32   int32_t
-#define i64   int64_t
-#define u8    uint8_t
-#define u16   uint16_t
-#define u32   uint32_t
-#define u64   uint64_t
+typedef int8_t    i8;
+typedef int16_t   i16;
+typedef int32_t   i32;
+typedef int64_t   i64;
+typedef uint8_t   u8;
+typedef uint16_t  u16;
+typedef uint32_t  u32;
+typedef uint64_t  u64;
+
+
+// geom primitive types
+struct vec {
+	i32 x;
+	i32 y;
+};
+
+struct rec {
+	i32 x;                    // min x
+	i32 y;                    // min y
+	i32 w;                    // max x - min x
+	i32 h;                    // max y - min y
+};
+
+typedef struct vec vec;
+typedef struct rec rec;
+
+inline vec v(i32 x ,i32 y)
+{
+	return (vec){
+		.x = x,
+		.y = y,
+	};
+}
+
+inline rec r(vec min, vec max)
+{
+	assert(min.x <= max.x);
+	assert(min.y <= max.y);
+	return (rec){
+		.x = min.x,
+		.y = min.y,
+		.w = max.x - min.x,
+		.h = max.y - min.y,
+	};
+}
+
+inline vec rec_min(rec r)
+{
+	return v(r.x, r.y);
+}
+
+inline vec rec_max(rec r)
+{
+	return v(r.w - r.x, r.h - r.y);
+}
+
+inline vec rec_diag(rec r)
+{
+	return v(r.w, r.h);
+}
+
+
+// geom operators
+inline vec add_vec_vec(vec v0, vec v1)
+{
+	return v(v0.x + v1.x, v0.y + v1.y);
+}
+
+inline rec add_vec_rec(vec v0, rec r1)
+{
+	return r(add_vec_vec(v0, rec_min(r1)), add_vec_vec(v0, rec_max(r1)));
+}
+
+inline rec add_rec_vec(rec r0, vec v1)
+{
+	return add_vec_rec(v1, r0);
+}
+
+inline vec sub_vec_vec(vec v0, vec v1)
+{
+	return v(v0.x - v1.x, v0.y - v1.y);
+}
+
+inline rec sub_rec_vec(rec r0, vec v1)
+{
+	return r(sub_vec_vec(rec_min(r0), v1), sub_vec_vec(rec_max(r0), v1));
+}
+
+#define add(a,b) _Generic((a),          \
+	rec:	add_rec_vec,            \
+	vec:	add_vec_other(b))((a),(b))
+
+#define add_vec_other(b) _Generic((b),  \
+	rec:	add_vec_rec,            \
+	vec:	add_vec_vec)
+
+#define sub(a,b) _Generic((a),          \
+	rec:	sub_rec_vec,            \
+	vec:	sub_vec_vec)((a),(b))
+
+
 
 
 // TODO: regroup in header of constant values / platform values
@@ -96,7 +191,8 @@ int mapped_file_print(int out_fd, struct mapped_file *f)
 	u8* c = f->data;
 	u8* stop = f->data + f->file_stat.st_size;
 	while (c < stop) {
-		u8* line_end = memchr(c, '\n', (size_t)(stop - c)) + 1;
+		u8* line_end = memchr(c, '\n', (size_t)(stop - c));
+		line_end++;
 		write(out_fd, c, (size_t)(line_end - c));
 		// TODO: check errors
 		c = line_end;
@@ -104,7 +200,8 @@ int mapped_file_print(int out_fd, struct mapped_file *f)
 	return 0;
 }
 
-int alloc_pages(void *base_addr, int n_page) {
+int alloc_pages(void *base_addr, int n_page)
+{
 	size_t size = n_page * PageSize;
 	int prot = PROT_READ | PROT_WRITE;
 	int flags = MAP_PRIVATE | MAP_ANON | MAP_FIXED;
@@ -122,8 +219,8 @@ int main(int argc, char **args)
 	puts("hello chizel !!");
 
 	void *addr = (void*) 0xffff000000;
-	int r = alloc_pages(addr, 24);
-	_fail_if(r < 0, "alloc_pages(mmap) failed: %s", strerror(errno));
+	int z = alloc_pages(addr, 24);
+	_fail_if(z < 0, "alloc_pages(mmap) failed: %s", strerror(errno));
 
 	struct mapped_file f = {
 		.name =
@@ -133,4 +230,18 @@ int main(int argc, char **args)
 	mapped_file_load(&f);
 
 	mapped_file_print(STDOUT_FILENO, &f);
+
+
+
+	rec r0 = r(v(1, 4), v(8, 9));
+	vec v1 = v(5, 6);
+	vec v2 = v(3, 2);
+
+	//rec r1 = add(r0, v1);
+	//rec r2 = add(v2, r0);
+
+	vec v3 = add(v1, v2);
+
+	vec v4 = sub(v3, v2);
+	//rec r3 = sub(r2, v3);
 }
