@@ -214,6 +214,51 @@ int alloc_pages(void *base_addr, int n_page)
 	return  0;
 }
 
+struct text {
+	u8 *start;
+	u8 *stop;
+};
+
+struct block {
+	i32 prev;	     // index of previous
+	i32 next;            // and next block in BLOCK_BUFFER
+	i32 n_newline;       // number of newline chars in that block
+	struct text text;
+};
+
+#define BLOCK_BUFFER (128 * 1024)
+_global struct block blocks[BLOCK_BUFFER] = {};            // = 128k blocks = 3.5MB
+_global int block_next_index = 0;
+
+
+/* Blocks
+ *   - stored in a static fixed-sized array,
+ *   - referenced by their indexes into that static array,
+ *   - contains references to previous and next block
+ *   - contains pointers into text data (either mapped file or the append buffer)
+ *   - a file is a chain of blocks
+ *
+ *   - reqs:  insert block, delete, split block
+ */
+
+
+#define APPEND_BUFFER_SIZE (1024 * 1024)
+_global u8 append_buffer[APPEND_BUFFER_SIZE] = {};         // = 1MB
+_global u8* append_cursor = append_buffer;
+_global const u8* append_cursor_end = append_buffer + APPEND_BUFFER_SIZE;
+
+void append_char(u8 c) {
+	assert(append_cursor < append_cursor_end);
+	*append_cursor++ = c;
+}
+
+void append_input(u8 *input, size_t len) {
+	assert(append_cursor + len < append_cursor_end);
+	memcpy(append_cursor, input, len);
+	append_cursor += len;
+	// TODO: return struct block
+}
+
 int main(int argc, char **args)
 {
 	puts("hello chizel !!");
