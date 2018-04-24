@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -259,6 +260,185 @@ void append_input(u8 *input, size_t len) {
 	// TODO: return struct block
 }
 
+
+/* KEY INPUT HANDLING */
+
+enum key_code {
+	NO_KEY           = 0,
+	CTRL_C           = 3,
+	CTRL_D           = 4,
+	CTRL_F           = 6,
+	CTRL_H           = 8,
+	TAB              = 9,       // also ctrl + i
+	RETURN           = 10,      // also ctrl + j
+	CTRL_K           = 11,
+	CTRL_L           = 12,
+	ENTER            = 13,
+	CTRL_Q           = 17,
+	CTRL_S           = 19,
+	CTRL_U           = 21,
+	CTRL_Z           = 26,
+	ESC              = 27,      // also ctrl + [
+	BACKSPACE        = 127,
+
+	SOFTCODE_BASE    = 128,     // non-ascii escape sequences and other events
+	UNKNOWN_ESC_SEQ,
+	ESC_Z,                      // shift + tab -> "\027[Z"
+	RESIZE,
+	CLICK,
+	CLICK_RELEASE,
+	ERROR,
+	KEY_CODE_END,
+};
+
+struct key_input {
+	i32 c;
+	struct {
+		i16 x;
+		i16 y;
+	} click;
+	// TODO: add errno ?
+};
+
+_global const char* key_code_names[KEY_CODE_END] = {
+	[NO_KEY]                = "NO_KEY",
+	[CTRL_C]                = "CTRL_C",
+	[CTRL_D]                = "CTRL_D",
+	[CTRL_F]                = "CTRL_F",
+	[CTRL_H]                = "CTRL_H",
+	[TAB]                   = "TAB",
+	[RETURN]                = "RETURN",
+	[CTRL_K]                = "CTRL_K",
+	[CTRL_L]                = "CTRL_L",
+	[ENTER]                 = "ENTER",
+	[CTRL_Q]                = "CTRL_Q",
+	[CTRL_S]                = "CTRL_S",
+	[CTRL_U]                = "CTRL_U",
+	[CTRL_Z]                = "CTRL_Z",
+	[ESC]                   = "ESC",
+	[BACKSPACE]             = "BACKSPACE",
+	[UNKNOWN_ESC_SEQ]       = "UNKNOWN_ESC_SEQ",
+	[ESC_Z]                 = "ESC_Z",
+	[ERROR]                 = "ERROR",
+	[RESIZE]                = "RESIZE",
+	[CLICK]                 = "CLICK",
+	[CLICK_RELEASE]         = "CLICK_RELEASE",
+	//default]	       "UNKNOWN",
+};
+
+
+char* key_print(char *dst, size_t len, struct key_input k)
+{
+	if (ESC < k.c && k.c < BACKSPACE) {
+		*dst = k.c;
+		return dst + 1;
+	}
+
+	switch (k.c) {
+	case NO_KEY:
+	case CTRL_C:
+	case CTRL_D:
+	case CTRL_F:
+	case CTRL_H:
+	case TAB:
+	case CTRL_K:
+	case CTRL_L:
+	case ENTER:
+	case CTRL_Q:
+	case CTRL_S:
+	case CTRL_U:
+	case CTRL_Z:
+	case ESC:
+	case BACKSPACE:
+	case SOFTCODE_BASE:
+	case UNKNOWN_ESC_SEQ:
+	case ESC_Z:
+	case RESIZE:
+	case CLICK:
+	case CLICK_RELEASE:
+	case ERROR:             return stpncpy(dst, key_code_names[k.c], len);
+	default:                return dst + snprintf(dst, len, "UNKNOWN(%d)", k.c);
+	}
+}
+
+_local struct key_input k(i32 k)
+{
+	return (struct key_input) {
+		.c = k,
+	};
+}
+
+_local struct key_input k_click(i32 k, i32 x, i32 y)
+{
+	return (struct key_input) {
+		.c = k,
+		.click.x = x,
+		.click.y = y,
+	};
+}
+
+_local i32 read_char()
+{
+	u8 c;
+
+	int n = 0;
+	while (n == 0) {
+		n = read(STDIN_FILENO, &c, 1);
+	}
+
+	// Terminal resize events send SIGWINCH signals which interrupt read()
+	if (n < 0 && errno == EINTR) {
+		return RESIZE;
+	}
+	// TODO: error should not be fatal ?
+	if (n < 0) {
+		perror("read_input failed");
+		return ERROR;
+	}
+
+	return c;
+}
+
+struct key_input read_input()
+{
+	i32 c = read_char();
+
+	if (c != ESC) {
+		return k(c);
+	}
+
+	// Escape sequence
+	assert(read_char() == '[');
+	c = read_char();
+	switch (c) {
+	case 'M':              break; // Mouse click, handled separately
+	case 'Z':              return k(ESC_Z);
+	default:               return k(UNKNOWN_ESC_SEQ);
+	}
+
+	// Mouse click
+	// TODO: support other mouse modes
+	c = read_char();
+	i32 x = read_char() - 33;
+	i32 y = read_char() - 33;
+	if (x < 0) {
+		x += 255;
+	}
+	if (y < 0) {
+		y += 255;
+	}
+
+	switch (c) {
+	case 0:
+	case 1:
+	case 2:                return k_click(CLICK, x, y);
+	case 3:                return k_click(CLICK_RELEASE, x, y);
+	default:               return k(UNKNOWN_ESC_SEQ);
+	}
+}
+
+
+
 int main(int argc, char **args)
 {
 	puts("hello chizel !!");
@@ -289,4 +469,12 @@ int main(int argc, char **args)
 
 	vec v4 = sub(v3, v2);
 	//rec r3 = sub(r2, v3);
+
+
+	char buf[1024] = {};
+	for (;;) {
+		char* end = key_print(buf, 1024, read_input());
+		*end = 0;
+		puts(buf);
+	}
 }
