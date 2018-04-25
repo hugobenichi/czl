@@ -32,6 +32,9 @@ typedef uint16_t  u16;
 typedef uint32_t  u32;
 typedef uint64_t  u64;
 
+// Careful: the result gets evaluated twice
+#define max(x,y) ((x) > (y) ? : (x) : (y))
+#define min(x,y) ((x) < (y) ? : (x) : (y))
 
 // geom primitive types
 struct vec {
@@ -215,16 +218,17 @@ int alloc_pages(void *base_addr, int n_page)
 	return  0;
 }
 
-struct text {
+struct slice {
 	u8 *start;
 	u8 *stop;
 };
+typedef struct slice slice;
 
 struct block {
 	i32 prev;	     // index of previous
 	i32 next;            // and next block in BLOCK_BUFFER
 	i32 n_newline;       // number of newline chars in that block
-	struct text text;
+	slice text;
 };
 
 #define BLOCK_BUFFER (128 * 1024)
@@ -326,10 +330,14 @@ _global const char* key_code_names[KEY_CODE_END] = {
 	//default]	       "UNKNOWN",
 };
 
+i32 is_printable(i32 c)
+{
+	return ESC < c && c < BACKSPACE;
+}
 
 char* key_print(char *dst, size_t len, struct key_input k)
 {
-	if (ESC < k.c && k.c < BACKSPACE) {
+	if (is_printable(k.c)) {
 		*dst = k.c;
 		return dst + 1;
 	}
@@ -407,6 +415,8 @@ struct key_input read_input()
 		return k(c);
 	}
 
+	// TODO: support unicode !
+
 	// Escape sequence
 	assert(read_char() == '[');
 	c = read_char();
@@ -437,6 +447,28 @@ struct key_input read_input()
 	}
 }
 
+slice input_capture(slice buffer)
+{
+	slice cursor = {
+		.start = buffer.start,
+		.stop  = buffer.start,
+	};
+	while (cursor.stop < buffer.stop) {
+		struct key_input k = read_input();
+		if (is_printable(k.c)) {
+			*cursor.stop++ = k.c;
+		}
+		if (k.c == TAB) {
+			*cursor.stop++ = '\t';
+		}
+		// TODO: support UTF8
+		if (k.c == RETURN) {
+			break;
+		}
+		// else, skip
+	}
+	return cursor;
+}
 
 
 int main(int argc, char **args)
@@ -472,9 +504,17 @@ int main(int argc, char **args)
 
 
 	char buf[1024] = {};
-	for (;;) {
-		char* end = key_print(buf, 1024, read_input());
-		*end = 0;
-		puts(buf);
-	}
+//	for (;;) {
+//		char* end = key_print(buf, 1024, read_input());
+//		*end = 0;
+//		puts(buf);
+//	}
+
+	slice s = {
+		.start = (u8*) buf,
+		.stop  = (u8*) buf + 1024,
+	};
+	slice input = input_capture(s);
+	write(STDIN_FILENO, (char*) input.start, input.stop - input.start);
+	puts("");
 }
