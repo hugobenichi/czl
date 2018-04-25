@@ -34,24 +34,31 @@ typedef uint16_t  u16;
 typedef uint32_t  u32;
 typedef uint64_t  u64;
 
-// Careful: the result gets evaluated twice
-#define max(x,y) ((x) > (y) ? : (x) : (y))
-#define min(x,y) ((x) < (y) ? : (x) : (y))
+// Careful: the result expr gets evaluated twice
+#define _max(x,y) ((x) > (y) ? : (x) : (y))
+#define _min(x,y) ((x) < (y) ? : (x) : (y))
 
 // geom primitive types
 struct vec {
 	i32 x;
 	i32 y;
 };
+typedef struct vec vec;
 
 struct rec {
-	i32 x;                    // min x
-	i32 y;                    // min y
-	i32 w;                    // max x - min x
-	i32 h;                    // max y - min y
+	union {
+		struct {
+			vec min;
+			vec max;
+		};
+		struct {
+			i32 x0;
+			i32 y0;
+			i32 x1;
+			i32 y1;
+		};
+	};
 };
-
-typedef struct vec vec;
 typedef struct rec rec;
 
 inline vec v(i32 x ,i32 y)
@@ -67,26 +74,9 @@ inline rec r(vec min, vec max)
 	assert(min.x <= max.x);
 	assert(min.y <= max.y);
 	return (rec){
-		.x = min.x,
-		.y = min.y,
-		.w = max.x - min.x,
-		.h = max.y - min.y,
+		.min = min,
+		.max = max,
 	};
-}
-
-inline vec rec_min(rec r)
-{
-	return v(r.x, r.y);
-}
-
-inline vec rec_max(rec r)
-{
-	return v(r.w - r.x, r.h - r.y);
-}
-
-inline vec rec_diag(rec r)
-{
-	return v(r.w, r.h);
 }
 
 
@@ -98,7 +88,7 @@ inline vec add_vec_vec(vec v0, vec v1)
 
 inline rec add_vec_rec(vec v0, rec r1)
 {
-	return r(add_vec_vec(v0, rec_min(r1)), add_vec_vec(v0, rec_max(r1)));
+	return r(add_vec_vec(v0, r1.min), add_vec_vec(v0, r1.max));
 }
 
 inline rec add_rec_vec(rec r0, vec v1)
@@ -113,7 +103,7 @@ inline vec sub_vec_vec(vec v0, vec v1)
 
 inline rec sub_rec_vec(rec r0, vec v1)
 {
-	return r(sub_vec_vec(rec_min(r0), v1), sub_vec_vec(rec_max(r0), v1));
+	return r(sub_vec_vec(r0.min, v1), sub_vec_vec(r0.max, v1));
 }
 
 #define add(a,b) _Generic((a),          \
@@ -129,7 +119,35 @@ inline rec sub_rec_vec(rec r0, vec v1)
 	vec:	sub_vec_vec)((a),(b))
 
 
+inline vec rec_diag(rec r)
+{
+	return sub_vec_vec(r.max, r.min);
+}
 
+inline i32 rec_w(rec r)
+{
+	return r.x1 - r.x0;
+}
+
+inline i32 rec_h(rec r)
+{
+	return r.y1 - r.y0;
+}
+
+
+char* vec_print(char *dst, size_t len, vec v)
+{
+	int n = snprintf(dst, len, "{.x=%d, .y=%d}", v.x, v.y);
+	return dst + n; //_min(n, len);
+}
+
+char* rec_print(char *dst, size_t len, rec r)
+{
+	i32 w = rec_w(r);
+	i32 h = rec_h(r);
+	int n = snprintf(dst, len, "{.x0=%d, .y0=%d, .x1=%d, .y1=%d, w=%d, .h=%d}", r.x0, r.y0, r.x1, r.y1, w, h);
+	return dst + n; //_min(n, len);
+}
 
 // TODO: regroup in header of constant values / platform values
 static const size_t PageSize = 0x1000;
@@ -584,22 +602,30 @@ int main(int argc, char **args)
 
 
 
-	//rec r0 = r(v(1, 4), v(8, 9));
+	rec r0 = r(v(1, 4), v(8, 9));
 	vec v1 = v(5, 6);
 	vec v2 = v(3, 2);
 
-	// BUG: add/sub with rec does not work ?!?
-	//rec r1 = add(r0, v1);
-	//rec r2 = add(v2, r0);
+	rec r1 = add(r0, v1);
+	rec r2 = add(v2, r1);
 	vec v3 = add(v1, v2);
 
 	vec v4 = sub(v3, v2);
-	//rec r5 = sub(r2, v3);
-	v4 = v3;
-	//r5 = r0;
-
+	rec r3 = sub(r2, v3);
 
 	char buf[1024] = {};
+
+	*vec_print(buf, 1024, v1) = 0;     puts(buf);
+	*vec_print(buf, 1024, v2) = 0;     puts(buf);
+	*vec_print(buf, 1024, v3) = 0;     puts(buf);
+	*vec_print(buf, 1024, v4) = 0;     puts(buf);
+
+	*rec_print(buf, 1024, r0) = 0;     puts(buf);
+	*rec_print(buf, 1024, r1) = 0;     puts(buf);
+	*rec_print(buf, 1024, r2) = 0;     puts(buf);
+	*rec_print(buf, 1024, r3) = 0;     puts(buf);
+
+
 //	for (;;) {
 //		char* end = key_print(buf, 1024, read_input());
 //		*end = 0;
