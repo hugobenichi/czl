@@ -7,8 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
 #include <unistd.h>
 
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
@@ -218,11 +220,103 @@ int alloc_pages(void *base_addr, int n_page)
 	return  0;
 }
 
+
+// TERMINAL STUFF
+
+//static const char term_seq_finish[]                       = "\x1b[0m";
+//static const char term_clear[]                            = "\x1bc";
+//static const char term_newline[]                          = "\r\n";
+//static const char term_cursor_hide[]                      = "\x1b[?25l";
+//static const char term_cursor_show[]                      = "\x1b[?25h";
+static const char term_cursor_save[]                      = "\x1b[s";
+static const char term_cursor_restore[]                   = "\x1b[u";
+static const char term_switch_offscreen[]                 = "\x1b[?47h";
+static const char term_switch_mainscreen[]                = "\x1b[?47l";
+static const char term_switch_mouse_event_on[]            = "\x1b[?1000h";
+static const char term_switch_mouse_tracking_on[]         = "\x1b[?1002h";
+static const char term_switch_mouse_tracking_off[]        = "\x1b[?1002l";
+static const char term_switch_mouse_event_off[]           = "\x1b[?1000l";
+//static const char term_switch_focus_event_on[]            = "\x1b[?1004h";
+//static const char term_switch_focus_event_off[]           = "\x1b[?1004l";
+
+vec term_get_size()
+{
+	struct winsize w = {};
+	int z = ioctl(1, TIOCGWINSZ, &w);
+	if (z < 0) {
+		perror("window_get_size: ioctl() failed");
+		exit(1);
+	}
+	return v(w.ws_row, w.ws_col);
+}
+
+struct termios termios_initial = {};
+
+void term_restore()
+{
+	tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_initial);
+	//fprintf(stdout, term_switch_focus_event_off);
+	fprintf(stdout, term_switch_mouse_tracking_off);
+	fprintf(stdout, term_switch_mouse_event_off);
+	fprintf(stdout, term_switch_mainscreen);
+	fprintf(stdout, term_cursor_restore);
+}
+
+void term_raw()
+{
+	int z;
+	z = tcgetattr(STDIN_FILENO, &termios_initial);
+	if (z < 0) {
+		errno = ENOTTY;
+		perror("term_raw: tcgetattr() failed");
+		exit(1);
+	}
+	atexit(term_restore);
+
+	fprintf(stdout, term_cursor_save);
+	fprintf(stdout, term_switch_offscreen);
+	fprintf(stdout, term_switch_mouse_event_on);
+	fprintf(stdout, term_switch_mouse_tracking_on);
+	//fprintf(stdout, term_switch_focus_event_on); // TODO: turn on and check if files need reload.
+
+	struct termios termios_raw = termios_initial;
+	termios_raw.c_iflag &= ~BRKINT;                    // no break
+	termios_raw.c_iflag &= ~ICRNL;                     // no CR to NL
+	termios_raw.c_iflag &= ~INPCK;                     // no parity check
+	termios_raw.c_iflag &= ~ISTRIP;                    // no strip character
+	termios_raw.c_iflag &= ~IXON;                      // no CR to NL
+	termios_raw.c_oflag &= ~OPOST;                     // no post processing
+	termios_raw.c_lflag &= ~ECHO;                      // no echo
+	termios_raw.c_lflag &= ~ICANON;
+	termios_raw.c_lflag &= ~ISIG;
+	termios_raw.c_cc[VMIN] = 0;                        // return each byte, or nothing when timeout
+	termios_raw.c_cc[VTIME] = 100;                     // 100 * 100 ms timeout
+	termios_raw.c_cflag |= CS8;                        // 8 bits chars
+
+	z = tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_raw);
+	if (z < 0) {
+		errno = ENOTTY;
+		perror("term_raw: tcsetattr() failed");
+		exit(1);
+	}
+}
+
 struct slice {
 	u8 *start;
 	u8 *stop;
 };
 typedef struct slice slice;
+
+
+/* Blocks
+ *   - stored in a static fixed-sized array,
+ *   - referenced by their indexes into that static array,
+ *   - contains references to previous and next block
+ *   - contains pointers into text data (either mapped file or the append buffer)
+ *   - a file is a chain of blocks
+ *
+ *   - reqs:  insert block, delete, split block
+ */
 
 struct block {
 	i32 prev;	     // index of previous
@@ -235,16 +329,16 @@ struct block {
 _global struct block blocks[BLOCK_BUFFER] = {};            // = 128k blocks = 3.5MB
 _global int block_next_index = 0;
 
+void block_add(slice t)
+{
+	if (block_next_index >= BLOCK_BUFFER) {
+		perror("block_add: no more blocks !");
+		exit(1);
+	}
 
-/* Blocks
- *   - stored in a static fixed-sized array,
- *   - referenced by their indexes into that static array,
- *   - contains references to previous and next block
- *   - contains pointers into text data (either mapped file or the append buffer)
- *   - a file is a chain of blocks
- *
- *   - reqs:  insert block, delete, split block
- */
+	blocks[block_next_index].text = t;
+	block_next_index++;
+}
 
 
 #define APPEND_BUFFER_SIZE (1024 * 1024)
@@ -287,7 +381,7 @@ enum key_code {
 
 	SOFTCODE_BASE    = 128,     // non-ascii escape sequences and other events
 	UNKNOWN_ESC_SEQ,
-	ESC_Z,                      // shift + tab -> "\027[Z"
+	ESC_Z,                      // shift + tab -> "\x1b[Z"
 	RESIZE,
 	CLICK,
 	CLICK_RELEASE,
@@ -490,17 +584,19 @@ int main(int argc, char **args)
 
 
 
-	rec r0 = r(v(1, 4), v(8, 9));
+	//rec r0 = r(v(1, 4), v(8, 9));
 	vec v1 = v(5, 6);
 	vec v2 = v(3, 2);
 
+	// BUG: add/sub with rec does not work ?!?
 	//rec r1 = add(r0, v1);
 	//rec r2 = add(v2, r0);
-
 	vec v3 = add(v1, v2);
 
 	vec v4 = sub(v3, v2);
-	//rec r3 = sub(r2, v3);
+	//rec r5 = sub(r2, v3);
+	v4 = v3;
+	//r5 = r0;
 
 
 	char buf[1024] = {};
@@ -510,6 +606,12 @@ int main(int argc, char **args)
 //		puts(buf);
 //	}
 
+
+
+	term_raw();
+	// struct key_input k = read_input(); // BUG: read_input() blocks forever in raw mode ??
+
+	if (0) {
 	slice s = {
 		.start = (u8*) buf,
 		.stop  = (u8*) buf + 1024,
@@ -517,4 +619,5 @@ int main(int argc, char **args)
 	slice input = input_capture(s);
 	write(STDIN_FILENO, (char*) input.start, input.stop - input.start);
 	puts("");
+	}
 }
