@@ -23,6 +23,10 @@
 #define _global static
 
 
+static const char logs_path[] = "/tmp/czl.log";
+static FILE *logs;
+
+
 // Standard int types
 #include <stdint.h>
 typedef int8_t    i8;
@@ -239,7 +243,12 @@ int alloc_pages(void *base_addr, int n_page)
 }
 
 
-// TERMINAL STUFF
+
+
+
+
+
+/* TERMINAL STUFF */
 
 //static const char term_seq_finish[]                       = "\x1b[0m";
 //static const char term_clear[]                            = "\x1bc";
@@ -319,62 +328,205 @@ void term_raw()
 	}
 }
 
-struct slice {
+
+
+
+
+
+
+/* FILEBUFFER and TEXT MANAGEMENT */
+
+// A block of memory with a moving cursor. Invariant: start <= cursor <= cursor.
+struct buffer {
 	u8 *start;
 	u8 *stop;
+	u8 *cursor;
+};
+
+struct buffer buffer_mk(void *ptr, size_t len)
+{
+	u8* mem = ptr;
+	return (struct buffer) {
+		.start   = mem,
+		.stop    = mem + len,
+		.cursor  = mem,
+	};
+}
+
+void buffer_reset(struct buffer *b)
+{
+	b->cursor = b->start;
+}
+
+struct buffer buffer_sub(struct buffer *b, i32 offset, i32 len)
+{
+	assert(b->start + offset < b->stop);
+	assert(b->start + offset + len < b->stop);
+	return buffer_mk(b->start + offset, len);
+}
+
+void buffer_append(struct buffer *b, u8 *c, i32 n)
+{
+	assert(b->cursor + n < b->stop);
+	memcpy(b->cursor, c, n);
+	b->cursor += n;
+}
+
+void buffer_append1(struct buffer *b, u8 c)
+{
+	buffer_append(b, &c, 1);
+}
+
+
+// Delimits a range of memory. Invariant: start <= stop.
+struct slice {
+	u8 *start;     // inclusive
+	u8 *stop;      // exclusive
 };
 typedef struct slice slice;
 
+// TODO: helper fns for 1) appending char, 2) wrapping line of text based on separator char
 
-/* Blocks
- *   - stored in a static fixed-sized array,
- *   - referenced by their indexes into that static array,
- *   - contains references to previous and next block
- *   - contains pointers into text data (either mapped file or the append buffer)
- *   - a file is a chain of blocks
- *
- *   - reqs:  insert block, delete, split block
- */
 
-struct block {
-	i32 prev;	     // index of previous
-	i32 next;            // and next block in BLOCK_BUFFER
-	i32 n_newline;       // number of newline chars in that block
-	slice text;
+// A buffer of lines represented as slices.
+struct line_buffer {
+	slice *lines;
+	slice *next;
+	i32 n_lines;
 };
 
-#define BLOCK_BUFFER (128 * 1024)
-_global struct block blocks[BLOCK_BUFFER] = {};            // = 128k blocks = 3.5MB
-_global int block_next_index = 0;
-
-void block_add(slice t)
+struct line_buffer line_buffer_mk(void* ptr, size_t len)
 {
-	if (block_next_index >= BLOCK_BUFFER) {
-		perror("block_add: no more blocks !");
-		exit(1);
-	}
+	return (struct line_buffer) {
+		.lines   = ptr,
+		.next    = ptr,
+		.n_lines = sizeof(slice) / len, // remainder of ptr are wasted
+	};
+};
 
-	blocks[block_next_index].text = t;
-	block_next_index++;
+slice* line_buffer_assign(struct line_buffer *b)
+{
+	assert(b->next < b->lines + b->n_lines);
+	return b->next++;
+}
+
+slice *line_buffer_last(struct line_buffer *b)
+{
+	assert(b->lines < b->next);
+	return b->next - 1;
 }
 
 
-#define APPEND_BUFFER_SIZE (1024 * 1024)
-_global u8 append_buffer[APPEND_BUFFER_SIZE] = {};         // = 1MB
-_global u8* append_cursor = append_buffer;
-_global const u8* append_cursor_end = append_buffer + APPEND_BUFFER_SIZE;
+// A block of lines, chained with its neighboring blocks.
+// Lines are slices specified as a ptr + len relative to a line buffer.
+// Therefore a block always refers to a contiguous array of lines.
+struct block {
+	struct block *prev;     // previous block
+	struct block *next;     // next block
+	slice *lines;           // first line of the block
+	i32 n_lines;            // number of lines in that block
+};
 
-void append_char(u8 c) {
-	assert(append_cursor < append_cursor_end);
-	*append_cursor++ = c;
+// TODO: decide how the first and last blocks are represented.
+
+// A buffer of blocks contiguous in memory.
+struct block_buffer {
+	struct block *blocks;
+	struct block *next;
+	i32 n_blocks;
+};
+
+struct block_buffer block_buffer_mk(void* ptr, size_t len)
+{
+	return (struct block_buffer) {
+		.blocks    = ptr,
+		.next      = ptr,
+		.n_blocks  = sizeof(struct block_buffer) / len, // remainder of ptr are wasted
+	};
 }
 
-void append_input(u8 *input, size_t len) {
-	assert(append_cursor + len < append_cursor_end);
-	memcpy(append_cursor, input, len);
-	append_cursor += len;
-	// TODO: return struct block
+struct block *block_buffer_last(struct block_buffer *b)
+{
+	assert(b->blocks < b->next);
+	return b->next - 1;
 }
+
+struct block *block_buffer_assign(struct block_buffer *b)
+{
+	assert(b->next < b->blocks + b->n_blocks);
+	return b->next++;
+}
+
+// A type of operation on a block buffer.
+enum block_op_type {
+	BLOCK_INSERT,
+	BLOCK_DELETE,
+};
+
+// Edit operation on a chain of blocks.
+// For inserts, one block is swapped out and three blocks are swapped in.
+// For deletes, one block is swapped out and two blocks are swapped in.
+struct block_op {
+	enum block_op_type t;
+	struct block *new_blocks;
+	struct block *old_block;
+};
+
+// A buffer of edit operations.
+struct block_op_history {
+	struct block_op *ops;
+	struct block_op *cursor;
+	struct block_op *last_op;
+	i32 n_ops_max;
+};
+
+struct block_op_history block_op_history_mk(void* ptr, size_t len)
+{
+	return (struct block_op_history) {
+		.ops	   = ptr,
+		.n_ops_max = sizeof(struct block_op) / len,
+		.cursor    = 0,
+		.last_op   = 0,
+	};
+}
+
+struct block_op block_buffer_delete(struct block_buffer *b, struct block *del_block)
+{
+	struct block *new_upper_block = block_buffer_assign(b);
+	struct block *new_lower_block = block_buffer_assign(b);
+
+	new_upper_block->prev = del_block->prev;
+	new_upper_block->next = new_lower_block;
+
+	new_lower_block->prev = new_upper_block;
+	new_lower_block->next = del_block->next;
+
+	return (struct block_op) {
+		.t = BLOCK_DELETE,
+		.new_blocks = new_upper_block,
+		.old_block  = del_block,
+	};
+}
+
+// All data relative to a text file representation in memory and insert/delete ops for undo/redo.
+struct filebuffer {
+	struct mapped_file         f;    // Mapped file, read only
+	struct buffer	           a;    // Buffer for insertions, append only
+	struct line_buffer         l;    // Buffer for line slices pointing into 'f' or 'a'
+	struct block_buffer        b;    // Buffer for blocks of lines
+	struct block_op_history	   h;    // Buffer for history of block operations
+};
+
+// TODO: allocator
+// TODO: helper fns for
+//         1) inserting a block (requires new block pointer, return an insert op)
+//         2) deleting a range of blocks (requires two new block pointers, return a delete op)
+//         3) appending chars
+//         4) locating blocks by line number
+
+
+
+
 
 
 /* KEY INPUT HANDLING */
@@ -583,12 +735,28 @@ slice input_capture(slice buffer)
 }
 
 
+
+
+
+
+
+#define print_sizeof(str_name) 	printf("sizeof(%s)= %lu\n", #str_name, sizeof(str_name))
+
 int main(int argc, char **args)
 {
+	logs = fopen(logs_path, "w");
+	assert(logs > 0);
+
+	printf("logs address: %p\n", &logs);
+
+	print_sizeof(struct filebuffer);
+
 	puts("hello chizel !!");
+	fputs("hello chizel !!\n", logs);
 
 	void *addr = (void*) 0xffff000000;
-	int z = alloc_pages(addr, 24);
+	int z = alloc_pages(addr, 262144*32);
+	// TODO: test claiming for lots of memory with unspecified base address
 	_fail_if(z < 0, "alloc_pages(mmap) failed: %s", strerror(errno));
 
 	struct mapped_file f = {
@@ -635,7 +803,11 @@ int main(int argc, char **args)
 
 
 	term_raw();
-	// struct key_input k = read_input(); // BUG: read_input() blocks forever in raw mode ??
+	struct key_input k = read_input();
+
+	snprintf(buf, 1024, "read_input: %d\n", k.c);
+	fputs(buf, logs);
+	puts(buf);
 
 	if (0) {
 	slice s = {
@@ -646,4 +818,7 @@ int main(int argc, char **args)
 	write(STDIN_FILENO, (char*) input.start, input.stop - input.start);
 	puts("");
 	}
+
+	fflush(logs);
+	fclose(logs);
 }
