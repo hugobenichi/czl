@@ -156,26 +156,10 @@ char* rec_print(char *dst, size_t len, rec r)
 // TODO: regroup in header of constant values / platform values
 static const size_t PageSize = 0x1000;
 
-
 // TODO: eventually move these signatures to header ?
 /* check that given boolean is true, otherwise print format string and exit */
 void fail_at_location_if(int has_failed, const char *loc, const char * msg, ...);
 #define _fail_if(has_failed, msg, args...) fail_at_location_if(has_failed, _source_loc(), msg, args)
-
-/* A file mapped into memory for manipulation in the editor, + its metadata */
-struct mapped_file {
-	char name[256]; // '\0' terminated filepath
-	struct stat file_stat;
-	u8* data;
-	// TODO: load timestamp
-};
-
-/* WRITEME */
-int alloc_pages(void *base_addr, int n_page);
-/* WRITEME */
-int mapped_file_load(struct mapped_file *f);
-
-
 
 void fail_at_location_if(int has_failed, const char *loc, const char * msg, ...)
 {
@@ -189,29 +173,6 @@ void fail_at_location_if(int has_failed, const char *loc, const char * msg, ...)
         va_end(args);
         fprintf(stderr, "\n");
         exit(1);
-}
-
-// TODO: R or RW ?
-// TODO: SHARED or PRIVATE ? if using MAP_SHARED, I should detect other process writing to the file
-int mapped_file_load(struct mapped_file *f)
-{
-	int fd = open(f->name, O_RDONLY);
-	_fail_if(fd < 0, "open %s failed: %s", f->name, strerror(errno));
-
-	int r = fstat(fd, &f->file_stat);
-	_fail_if(r < 0, "stat %s failed: %s", f->name, strerror(errno));
-
-	int prot = PROT_READ;
-	int flags = MAP_FILE | MAP_SHARED;
-	int offset = 0;
-
-	f->data = mmap(NULL, f->file_stat.st_size, prot, flags, fd, offset);
-	_fail_if(f->data == MAP_FAILED, "mapped_file_load(%s) failed: %s", f->name, strerror(errno));
-
-
-	close(fd);
-	// TODO: return mapped_file instead
-	return 0;
 }
 
 int alloc_pages(void *base_addr, int n_page)
@@ -384,6 +345,14 @@ struct slice_iter {
 	i32 sep;
 };
 
+inline i32 slice_len(slice s) {
+	return s.stop - s.start;
+}
+
+inline i32 slice_is_empty(slice s) {
+	return s.stop <= s.start;
+}
+
 i32 slice_iter_next(struct slice_iter *it, slice *s)
 {
 	u8 *cursor = it->cursor;
@@ -400,25 +369,22 @@ i32 slice_iter_next(struct slice_iter *it, slice *s)
 	return 1;
 }
 
-struct slice_iter mapped_file_line_iter(struct mapped_file *f)
+slice slice_split(slice *s, i32 sep)
 {
-	return (struct slice_iter) {
-		.cursor = f->data,
-		.stop   = f->data + f->file_stat.st_size,
-		.sep    = '\n',
-	};
-}
-
-void mapped_file_print(int out_fd, struct mapped_file *f)
-{
-	struct slice_iter it = mapped_file_line_iter(f);
-	slice s;
-	while (slice_iter_next(&it, &s)) {
-		slice_write(out_fd, s);
+	slice front = {};
+	slice back = *s;
+	i32 len = slice_len(back);
+	if (!len) {
+		return front;
 	}
+	front.start = back.start;
+	front.stop = memchr(back.start, sep, len);
+	front.stop++;
+	s->start = front.stop;
+	return front;
 }
 
-// TODO: helper fns for 1) appending char, 2) wrapping line of text based on separator char
+// TODO: slice helper fns for 1) appending char, 2) subslicing
 
 
 // A buffer of lines represented as slices.
@@ -546,6 +512,46 @@ struct block_op block_buffer_delete(struct block_buffer *b, struct block *del_bl
 	};
 }
 
+/* A file mapped into memory for manipulation in the editor, + its metadata */
+struct mapped_file {
+	char name[256]; // '\0' terminated filepath
+	struct stat file_stat;
+	slice data;
+	// TODO: mmap timestamp ?
+};
+
+
+// TODO: R or RW ?
+// TODO: SHARED or PRIVATE ? if using MAP_SHARED, I should detect other process writing to the file
+int mapped_file_load(struct mapped_file *f)
+{
+	int fd = open(f->name, O_RDONLY);
+	_fail_if(fd < 0, "open %s failed: %s", f->name, strerror(errno));
+
+	int r = fstat(fd, &f->file_stat);
+	_fail_if(r < 0, "stat %s failed: %s", f->name, strerror(errno));
+
+	int prot = PROT_READ;
+	int flags = MAP_FILE | MAP_SHARED;
+	int offset = 0;
+
+	size_t len = f->file_stat.st_size;
+	f->data.start = mmap(NULL, len, prot, flags, fd, offset);
+	f->data.stop  = f->data.start + len;
+	_fail_if(f->data.start == MAP_FAILED, "mapped_file_load(%s) failed: %s", f->name, strerror(errno));
+
+	close(fd);
+	return 0;
+}
+
+void mapped_file_print(int out_fd, struct mapped_file *f)
+{
+	slice s = f->data;
+	while (slice_len(s)) {
+		slice_write(out_fd, slice_split(&s, '\n'));
+	}
+}
+
 // All data relative to a text file representation in memory and insert/delete ops for undo/redo.
 struct filebuffer {
 	struct mapped_file         f;    // Mapped file, read only
@@ -574,16 +580,9 @@ void filebuffer_load(filebuffer *fb)
 	z = mapped_file_load(&fb->f);
 	assert(z == 0);
 
-	struct slice_iter it = mapped_file_line_iter(&fb->f);
-	slice s;
-	while (slice_iter_next(&it, &s)) {
-		// CLEANUP: this requires two assignement into an intermediary slice, which is a bit of a pity
-		// instead we should be able to write something like:
-		//	while (slice_iter_next(&it)) {
-		//		slice_iter_get(line_buffer_assign(fb->l);
-		//	}
-		// but this requires adding a field to the slice_iter
-		*line_buffer_assign(&fb->l) = s;
+	slice s = fb->f.data;
+	while (slice_len(s)) {
+		*line_buffer_assign(&fb->l) = slice_split(&s, '\n');
 	}
 
 	// Link initial blocks together
