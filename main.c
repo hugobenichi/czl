@@ -214,20 +214,6 @@ int mapped_file_load(struct mapped_file *f)
 	return 0;
 }
 
-int mapped_file_print(int out_fd, struct mapped_file *f)
-{
-	u8* c = f->data;
-	u8* stop = f->data + f->file_stat.st_size;
-	while (c < stop) {
-		u8* line_end = memchr(c, '\n', (size_t)(stop - c));
-		line_end++;
-		write(out_fd, c, (size_t)(line_end - c));
-		// TODO: check errors
-		c = line_end;
-	}
-	return 0;
-}
-
 int alloc_pages(void *base_addr, int n_page)
 {
 	size_t size = n_page * PageSize;
@@ -385,6 +371,53 @@ struct slice {
 };
 typedef struct slice slice;
 
+int slice_write(int fd, slice s)
+{
+	return write(fd, (void*) s.start, (size_t)(s.stop - s.start));
+}
+
+// A slice segment iterator that scans a piece of memory slice per slice on every
+// instance of 'sep' (interpreted as a char).
+struct slice_iter {
+	u8* cursor;
+	u8* stop;
+	i32 sep;
+};
+
+i32 slice_iter_next(struct slice_iter *it, slice *s)
+{
+	u8 *cursor = it->cursor;
+	u8 *stop   = it->stop;
+	if (stop <= cursor) {
+		return 0;
+	}
+	size_t n_max = (size_t)(cursor - stop);
+	u8* line_end = memchr(it->cursor, '\n', n_max);
+	line_end++;
+	s->start = cursor;
+	s->stop  = line_end;
+	it->cursor = line_end;
+	return 1;
+}
+
+struct slice_iter mapped_file_line_iter(struct mapped_file *f)
+{
+	return (struct slice_iter) {
+		.cursor = f->data,
+		.stop   = f->data + f->file_stat.st_size,
+		.sep    = '\n',
+	};
+}
+
+void mapped_file_print(int out_fd, struct mapped_file *f)
+{
+	struct slice_iter it = mapped_file_line_iter(f);
+	slice s;
+	while (slice_iter_next(&it, &s)) {
+		slice_write(out_fd, s);
+	}
+}
+
 // TODO: helper fns for 1) appending char, 2) wrapping line of text based on separator char
 
 
@@ -414,6 +447,11 @@ slice *line_buffer_last(struct line_buffer *b)
 {
 	assert(b->lines < b->next);
 	return b->next - 1;
+}
+
+i32 line_buffer_used(struct line_buffer *b)
+{
+	return (i32)(b->next - b->lines);
 }
 
 
@@ -515,7 +553,11 @@ struct filebuffer {
 	struct line_buffer         l;    // Buffer for line slices pointing into 'f' or 'a'
 	struct block_buffer        b;    // Buffer for blocks of lines
 	struct block_op_history	   h;    // Buffer for history of block operations
+
+	struct block *b_first;
+	struct block *b_last;
 };
+typedef struct filebuffer filebuffer;
 
 // TODO: allocator
 // TODO: helper fns for
@@ -525,6 +567,46 @@ struct filebuffer {
 //         4) locating blocks by line number
 
 
+// Map a file in memory, scan content for finding all lines, prepare initial line block.
+void filebuffer_load(filebuffer *fb)
+{
+	int z;
+	z = mapped_file_load(&fb->f);
+	assert(z == 0);
+
+	struct slice_iter it = mapped_file_line_iter(&fb->f);
+	slice s;
+	while (slice_iter_next(&it, &s)) {
+		// CLEANUP: this requires two assignement into an intermediary slice, which is a bit of a pity
+		// instead we should be able to write something like:
+		//	while (slice_iter_next(&it)) {
+		//		slice_iter_get(line_buffer_assign(fb->l);
+		//	}
+		// but this requires adding a field to the slice_iter
+		*line_buffer_assign(&fb->l) = s;
+	}
+
+	// Link initial blocks together
+	fb->b_first = block_buffer_assign(&fb->b);
+	fb->b_last = block_buffer_assign(&fb->b);
+	struct block *b = block_buffer_assign(&fb->b);
+	fb->b_first->next = b;
+	fb->b_last->prev = b;
+	b->prev = fb->b_first;
+	b->next = fb->b_last;
+
+	// Assign initial block of lines
+	b->lines = fb->l.lines;
+	b->n_lines = line_buffer_used(&fb->l);
+}
+/*
+    TODOs:
+	blit a section to screen (i.e line range iterator)
+	delete a range
+	insert a range
+	undo/redo
+	save content
+ */
 
 
 
