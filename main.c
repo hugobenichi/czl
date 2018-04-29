@@ -432,6 +432,15 @@ struct block {
 };
 
 // TODO: decide how the first and last blocks are represented.
+i32 block_is_first(struct block *b)
+{
+	return 0; // BUG
+}
+
+i32 block_is_last(struct block *b)
+{
+	return 0; // BUG
+}
 
 // A buffer of blocks contiguous in memory.
 struct block_buffer {
@@ -560,17 +569,113 @@ struct filebuffer {
 	struct block_buffer        b;    // Buffer for blocks of lines
 	struct block_op_history	   h;    // Buffer for history of block operations
 
-	struct block *b_first;
+	struct block *b_first; // TODO: should that be the guard blocks or not ??
 	struct block *b_last;
 };
 typedef struct filebuffer filebuffer;
 
-// TODO: allocator
-// TODO: helper fns for
-//         1) inserting a block (requires new block pointer, return an insert op)
-//         2) deleting a range of blocks (requires two new block pointers, return a delete op)
-//         3) appending chars
-//         4) locating blocks by line number
+// A cursor into a filebuffer that can be moved line by line.
+// Careful: cursors get invalidated by inserts and deletes !
+struct filebuffer_cursor {
+	struct block b;
+	i32 block_cursor;
+	i32 lineno;
+};
+
+struct filebuffer_cursor filebuffer_cursor_init(struct filebuffer *fb)
+{
+	return (struct filebuffer_cursor) {
+		.b = *fb->b_first,
+		.block_cursor = 0,
+		.lineno = 0,
+	};
+}
+
+i32 filebuffer_cursor_next(struct filebuffer_cursor *c)
+{
+	c->lineno++;
+	c->block_cursor++;
+	if (c->block_cursor == c->b.n_lines) {
+		if (block_is_last(c->b.next)) {
+			return 0;
+		}
+		c->b = *c->b.next;
+		c->block_cursor = 0;
+	}
+	return 1;
+}
+
+i32 filebuffer_cursor_prev(struct filebuffer_cursor *c)
+{
+	c->lineno--;
+	c->block_cursor--;
+	if (c->block_cursor == -1) {
+		if (block_is_first(c->b.prev)) {
+			return 0;
+		}
+		c->b = *c->b.prev;
+		c->block_cursor = c->b.n_lines - 1;
+	}
+	return 1;
+}
+
+slice filebuffer_cursor_get(struct filebuffer_cursor *c)
+{
+	return *(c->b.lines + c->block_cursor);
+}
+
+
+// TODO: should line iterator instead be used by value always as below and then make the
+// caller check the end-of-iteration condition by lineno < 0 ?
+struct filebuffer_cursor2 {
+	struct block *b;
+	i32 block_cursor;
+	i32 lineno;
+}; // this is 16B
+
+struct filebuffer_cursor2 filebuffer_cursor_next2(struct filebuffer_cursor2 c)
+{
+	c.lineno++;
+	c.block_cursor++;
+	if (c.block_cursor == c.b->n_lines) {
+		c.b = c.b->next;
+		c.block_cursor = 0;
+		if (block_is_last(c.b)) {
+			c.lineno = -1;
+		}
+	}
+	return c;
+}
+
+struct filebuffer_cursor2 filebuffer_cursor_prev2(struct filebuffer_cursor2 c)
+{
+	c.lineno--;
+	c.block_cursor--;
+	if (c.block_cursor < 0) {
+		c.b = c.b->prev;
+		c.block_cursor = c.b->n_lines - 1;
+		if (block_is_first(c.b)) {
+			c.lineno = -1;
+		}
+	}
+	return c;
+}
+
+slice filebuffer_cursor_get2(struct filebuffer_cursor2 c)
+{
+	return *(c.b->lines + c.block_cursor);
+}
+
+
+// filebuffer TODOs:
+//   - allocator
+//   - deleting a range of blocks
+//   - inserting a block
+//   - appending char to last insert
+//   - locating blocks by line number
+//   - undo/redo
+//   - save content
+//   - creating a cursor from given lineno
 
 
 // Map a file in memory, scan content for finding all lines, prepare initial line block.
@@ -598,14 +703,6 @@ void filebuffer_load(filebuffer *fb)
 	b->lines = fb->l.lines;
 	b->n_lines = line_buffer_used(&fb->l);
 }
-/*
-    TODOs:
-	blit a section to screen (i.e line range iterator)
-	delete a range
-	insert a range
-	undo/redo
-	save content
- */
 
 
 
