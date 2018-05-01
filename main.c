@@ -153,6 +153,19 @@ char* rec_print(char *dst, size_t len, rec r)
 	return dst + n; //_min(n, len);
 }
 
+
+
+
+
+
+
+/* BASE MEMORY UTILS */
+
+#define Kilo(x) (1024L * (x))
+#define Mega(x) (1024L * Kilo(x))
+#define Giga(x) (1024L * Mega(x))
+
+
 // TODO: regroup in header of constant values / platform values
 static const size_t PageSize = 0x1000;
 
@@ -175,22 +188,22 @@ void fail_at_location_if(int has_failed, const char *loc, const char * msg, ...)
         exit(1);
 }
 
-// CLEANUP: this should take in the base addr as a u64 literral, and return the ptr
-i32 v_alloc(void *base_addr, size_t size)
+void* v_alloc(u64 base_addr_lit, size_t size)
 {
+	void *base_addr = (void*) base_addr_lit;
 	int prot = PROT_READ | PROT_WRITE;
 	int flags = MAP_PRIVATE | MAP_ANON | MAP_FIXED;
 	int offset = 0;
 	void* real_addr = mmap(base_addr, size, prot, flags, -1, offset);
 	if (real_addr == MAP_FAILED) {
-		return -1;
+		return NULL;
 	}
 	assert(real_addr == base_addr);
-	return  0;
+	return  base_addr;
 }
 
-
-
+typedef void *(*allocator)(size_t);
+//static allocator generic_alloc = malloc;
 
 
 
@@ -337,36 +350,12 @@ int slice_write(int fd, slice s)
 	return write(fd, (void*) s.start, (size_t)(s.stop - s.start));
 }
 
-// A slice segment iterator that scans a piece of memory slice per slice on every
-// instance of 'sep' (interpreted as a char).
-struct slice_iter {
-	u8* cursor;
-	u8* stop;
-	i32 sep;
-};
-
 inline i32 slice_len(slice s) {
 	return s.stop - s.start;
 }
 
 inline i32 slice_is_empty(slice s) {
 	return s.stop <= s.start;
-}
-
-i32 slice_iter_next(struct slice_iter *it, slice *s)
-{
-	u8 *cursor = it->cursor;
-	u8 *stop   = it->stop;
-	if (stop <= cursor) {
-		return 0;
-	}
-	size_t n_max = (size_t)(cursor - stop);
-	u8* line_end = memchr(it->cursor, '\n', n_max);
-	line_end++;
-	s->start = cursor;
-	s->stop  = line_end;
-	it->cursor = line_end;
-	return 1;
 }
 
 slice slice_split(slice *s, i32 sep)
@@ -562,10 +551,12 @@ void mapped_file_print(int out_fd, struct mapped_file *f)
 
 // All data relative to a text file representation in memory and insert/delete ops for undo/redo.
 struct filebuffer {
+	// TODO: mapped_file.name should be stored somewhere else in some index of name -> filebuffer
 	struct mapped_file         f;    // Mapped file, read only
-	struct buffer	           a;    // Buffer for insertions, append only
+	struct buffer	           a;    // Buffer for insertions, append only.
 	struct line_buffer         l;    // Buffer for line slices pointing into 'f' or 'a'
 	struct block_buffer        b;    // Buffer for blocks of lines
+	// TODO: consider making this a ring buffer with bounded history length
 	struct block_op_history	   h;    // Buffer for history of block operations
 
 	struct block *b_first;
@@ -625,7 +616,6 @@ inline slice filebuffer_cursor_get(struct filebuffer_cursor *c)
 
 
 // filebuffer TODOs:
-//   - allocator
 //   - deleting a range of blocks
 //   - inserting a block
 //   - appending char to last insert
@@ -634,8 +624,58 @@ inline slice filebuffer_cursor_get(struct filebuffer_cursor *c)
 //   - creating a cursor from given lineno
 
 // Map a file in memory, scan content for finding all lines, prepare initial line block.
-void filebuffer_load(filebuffer *fb)
+static u64 filebuffer_alloc_base = Giga(256);
+static u64 filebuffer_alloc_span = Mega(8);
+static i32 filebuffer_alloc_n = 0;
+
+u64 filebuffer_init_next_addr() {
+	u64 a = filebuffer_alloc_base + filebuffer_alloc_n * filebuffer_alloc_span;
+	filebuffer_alloc_n ++;
+	return a;
+}
+
+// TODO: do something better which allows to deallocate memory regions
+//       and can grow dynamically, but no malloc !!
+//       A few considerations
+//       - in general we don't want to share the append buffers between filebuffer
+//         because closing a file would mean GC'ing the append buffer
+//       - line slices and blocks can be interleaved and share the same flat buffer
+//       - if line slices and blocks are refered via relative indexes, the whole filebuffer data can be moved
+//       - history buffer needs to be contiguous otherwise ops needs back and forth pointers ...
+//       - if history is bounded, then the line and block buffer could be GCed ...
+//
+//       Taking into account all of that into considerations a filebuffer should boil down to
+//         - the filename stored elsewhere in some kind of index
+//         - the file original data, size is known
+//         - the history buffer, can be bounded and fixed in size,
+//         - the append buffer, grows at the end only
+//         - the slice and block buffers, grows at the end only.
+//
+//       One possible solution
+//         - reference all blocks and line via relative index
+//         - link history ops together with relative index
+//         - alloc a small per-file initial memory region
+//         - bottom addresses are used in a forward fashion for the append buffer
+//         - top addresses are used in a backward fashion for line slices, blocks, history ops
+//         - when top and bottom are about to collide, move everything into a bigger block
+//	     - actually only the top block can be moved up with a single memmove once the upper regions
+//	     - is reallocated
+void filebuffer_init(struct filebuffer *fb)
 {
+	u64 addr = filebuffer_init_next_addr();
+	u8 *ptr = v_alloc(addr, filebuffer_alloc_span);
+	_fail_if(ptr == NULL, "filebuffer_alloc: v_alloc failed %lu\n", addr);
+
+	u8 *base_history_buffer       = ptr;
+	u8 *base_line_buffer          = ptr + Mega(2);
+	u8 *base_block_buffer         = ptr + Mega(4);
+	u8 *base_append_buffer        = ptr + Mega(6);
+
+	fb->a = buffer_mk(base_append_buffer, Mega(2));
+	fb->l = line_buffer_mk(base_line_buffer, Mega(2));
+	fb->b = block_buffer_mk(base_block_buffer, Mega(2));
+	fb->h = block_op_history_mk(base_history_buffer, Mega(2));
+
 	int z;
 	z = mapped_file_load(&fb->f);
 	assert(z == 0);
@@ -878,7 +918,7 @@ slice input_capture(slice buffer)
 
 
 
-#define print_sizeof(str_name) 	printf("sizeof(%s)= %lu\n", #str_name, sizeof(str_name))
+#define print_sizeof(str_name) 	printf("sizeof(%s)= %luB\n", #str_name, sizeof(str_name))
 
 int main(int argc, char **args)
 {
@@ -888,15 +928,16 @@ int main(int argc, char **args)
 	printf("logs address: %p\n", &logs);
 
 	print_sizeof(struct filebuffer);
+	print_sizeof(struct buffer);
+	print_sizeof(struct block_op);
 
 	puts("hello chizel !!");
 	fputs("hello chizel !!\n", logs);
 
-	void *addr = (void*) 0xffff000000;
-	int z = v_alloc(addr, PageSize * 12*32);
-	//int z = v_alloc(addr, 262144*32);
-	// TODO: test claiming for lots of memory with unspecified base address
-	_fail_if(z < 0, "v_alloc (mmap) failed: %s", strerror(errno));
+	u64 addr_base = 0xffff000000;
+	void* addr = v_alloc(addr_base, PageSize * 12*32);
+	//void* addr = v_alloc(addr, 262144*32);
+	_fail_if(addr == NULL, "v_alloc (mmap) failed: %s", strerror(errno));
 
 	struct mapped_file f = {
 		.name =
@@ -932,6 +973,8 @@ int main(int argc, char **args)
 	*rec_print(buf, 1024, r2) = 0;     puts(buf);
 	*rec_print(buf, 1024, r3) = 0;     puts(buf);
 
+	print_sizeof(struct block);
+	print_sizeof(struct slice);
 
 //	for (;;) {
 //		char* end = key_print(buf, 1024, read_input());
@@ -939,32 +982,12 @@ int main(int argc, char **args)
 //		puts(buf);
 //	}
 
-	// TODO: cleanup into filebuffer allocator !!
-	size_t len = 1024 * 1024;
-	void* base_append_buffer        = (void*) 0xffff000000 +  4 * 1024 * 1024;
-	void* base_line_buffer          = (void*) 0xffff000000 +  8 * 1024 * 1024;
-	void* base_block_buffer         = (void*) 0xffff000000 + 12 * 1024 * 1024;
-	void* base_history_buffer       = (void*) 0xffff000000 + 16 * 1024 * 1024;
-
-	z = v_alloc(base_append_buffer, len);
-	_fail_if(z < 0, "v_alloc failed: %s", strerror(errno));
-	z = v_alloc(base_line_buffer, len);
-	_fail_if(z < 0, "v_alloc failed: %s", strerror(errno));
-	z = v_alloc(base_block_buffer, len);
-	_fail_if(z < 0, "v_alloc failed: %s", strerror(errno));
-	z = v_alloc(base_history_buffer, len);
-	_fail_if(z < 0, "v_alloc failed: %s", strerror(errno));
-
 	struct filebuffer fb = {
 		.f.name = "/Users/hugobenichi/Desktop/editor/czl/Makefile",
-		.a = buffer_mk(base_append_buffer, len),
-		.l = line_buffer_mk(base_line_buffer, len),
-		.b = block_buffer_mk(base_block_buffer, len),
-		.h = block_op_history_mk(base_history_buffer, len),
 	};
-	filebuffer_load(&fb);
+	filebuffer_init(&fb);
 
-	char file[256] = "/Users/hugobenichi/Desktop/editor/czl/Makefile.bkp";
+	char file[256] = "/tmp/czl_Makefile.bkp";
 	int fd = open(file, O_RDWR|O_CREAT, 0644);
 	filebuffer_save(&fb, fd);
 	close(fd);
