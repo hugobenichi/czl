@@ -302,41 +302,94 @@ struct buffer {
 	u8 *stop;
 	u8 *cursor;
 };
+typedef struct buffer buffer;
 
-struct buffer buffer_mk(void *ptr, size_t len)
+buffer buffer_mk(void *ptr, size_t len)
 {
 	u8* mem = ptr;
-	return (struct buffer) {
+	return (buffer) {
 		.start   = mem,
 		.stop    = mem + len,
 		.cursor  = mem,
 	};
 }
 
-void buffer_reset(struct buffer *b)
+void buffer_reset(buffer *b)
 {
 	b->cursor = b->start;
 }
 
-struct buffer buffer_sub(struct buffer *b, i32 offset, i32 len)
+buffer buffer_sub(buffer *b, i32 offset, i32 len)
 {
 	assert(b->start + offset < b->stop);
 	assert(b->start + offset + len < b->stop);
 	return buffer_mk(b->start + offset, len);
 }
 
-void buffer_append(struct buffer *b, u8 *c, i32 n)
+void buffer_append(buffer *b, u8 *c, i32 n)
 {
 	assert(b->cursor + n < b->stop);
 	memcpy(b->cursor, c, n);
 	b->cursor += n;
 }
 
-void buffer_append1(struct buffer *b, u8 c)
+void buffer_append1(buffer *b, u8 c)
 {
 	buffer_append(b, &c, 1);
 }
 
+struct buffer_index {
+	i32 offset;
+};
+typedef struct buffer_index buffer_index;
+
+inline void* buffer_index_to_ptr(buffer *b, buffer_index i)
+{
+	return (void*) (b->start + i.offset);
+}
+
+inline buffer_index buffer_ptr_to_index(buffer *b, void* ptr)
+{
+	u8* addr = ptr;
+	assert(b->start <= addr);
+	assert(addr < b->stop);
+	return (buffer_index) {
+		.offset = (i32) (addr - b->start),
+	};
+}
+
+inline buffer_index buffer_get_top_index(buffer *b)
+{
+	return buffer_ptr_to_index(b, b->cursor);
+}
+
+inline buffer_index buffer_alloc(buffer *b, size_t len)
+{
+	assert(b->cursor + len <= b->stop);
+	buffer_index idx = buffer_get_top_index(b);
+	b->cursor += len;
+	return idx;
+}
+
+#define _def_buffer_getter(name, ptr_t)                                         \
+	inline ptr_t buffer_get_ ## name (buffer *b_ptr, buffer_index b_idx)    \
+	{                                                                       \
+		return (ptr_t) buffer_index_to_ptr(b_ptr, b_idx);               \
+	}
+
+#define _def_buffer_alloc(name, t)                                              \
+	inline buffer_index buffer_alloc_ ## name (buffer *b_ptr) {             \
+		return buffer_alloc(b_ptr, sizeof(t));                                 \
+	}
+
+
+struct slice;
+struct block;
+struct block_op;
+
+_def_buffer_getter(slice, struct slice*);
+_def_buffer_getter(block, struct block*);
+_def_buffer_getter(block_op, struct block_op*);
 
 // Delimits a range of memory. Invariant: start <= stop.
 struct slice {
@@ -508,6 +561,10 @@ struct block_op block_buffer_delete(struct block_buffer *b, struct block *del_bl
 		.old_block  = del_block,
 	};
 }
+
+_def_buffer_alloc(slice, struct slice);
+_def_buffer_alloc(block, struct block);
+_def_buffer_alloc(block_op, struct block_op);
 
 /* A file mapped into memory for manipulation in the editor, + its metadata */
 struct mapped_file {
