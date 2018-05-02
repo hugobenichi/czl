@@ -161,6 +161,8 @@ char* rec_print(char *dst, size_t len, rec r)
 
 /* BASE MEMORY UTILS */
 
+#define print_sizeof(str_name) 	printf("sizeof(%s)= %luB\n", #str_name, sizeof(str_name))
+
 #define Kilo(x) (1024L * (x))
 #define Mega(x) (1024L * Kilo(x))
 #define Giga(x) (1024L * Mega(x))
@@ -296,7 +298,7 @@ void term_raw()
 
 /* FILEBUFFER and TEXT MANAGEMENT */
 
-// A block of memory with a moving cursor. Invariant: start <= cursor <= cursor.
+// A chunk of memory with a moving cursor. Invariant: start <= cursor <= cursor.
 struct buffer {
 	u8 *start;
 	u8 *stop;
@@ -343,6 +345,22 @@ struct buffer_index {
 };
 typedef struct buffer_index buffer_index;
 
+static const buffer_index buffer_index_invalid = {
+	.offset = -1,
+};
+
+inline buffer_index buffer_index_mk(i32 o) {
+	assert(0 <= o);
+	return (buffer_index) {
+		.offset = 0,
+	};
+}
+
+inline buffer_index buffer_index_offset(buffer_index i, i32 o)
+{
+	return buffer_index_mk(i.offset + o);
+}
+
 inline void* buffer_index_to_ptr(buffer *b, buffer_index i)
 {
 	return (void*) (b->start + i.offset);
@@ -353,9 +371,7 @@ inline buffer_index buffer_ptr_to_index(buffer *b, void* ptr)
 	u8* addr = ptr;
 	assert(b->start <= addr);
 	assert(addr < b->stop);
-	return (buffer_index) {
-		.offset = (i32) (addr - b->start),
-	};
+	return buffer_index_mk((i32) (addr - b->start));
 }
 
 inline buffer_index buffer_get_top_index(buffer *b)
@@ -387,7 +403,7 @@ struct slice;
 struct block;
 struct block_op;
 
-_def_buffer_getter(slice, struct slice*);
+_def_buffer_getter(line, struct slice*);
 _def_buffer_getter(block, struct block*);
 _def_buffer_getter(block_op, struct block_op*);
 
@@ -429,87 +445,44 @@ slice slice_split(slice *s, i32 sep)
 // TODO: slice helper fns for 1) appending char, 2) subslicing
 
 
-// A buffer of lines represented as slices.
-struct line_buffer {
-	slice *lines;
-	slice *next;
-	i32 n_lines;
-};
-
-struct line_buffer line_buffer_mk(void* ptr, size_t len)
-{
-	return (struct line_buffer) {
-		.lines   = ptr,
-		.next    = ptr,
-		.n_lines = len / sizeof(slice), // remainder of ptr are wasted
-	};
-};
-
-slice* line_buffer_assign(struct line_buffer *b)
-{
-	assert(b->next < b->lines + b->n_lines);
-	return b->next++;
-}
-
-slice *line_buffer_last(struct line_buffer *b)
-{
-	assert(b->lines < b->next);
-	return b->next - 1;
-}
-
-i32 line_buffer_used(struct line_buffer *b)
-{
-	return (i32)(b->next - b->lines);
-}
-
-
 // A block of lines, chained with its neighboring blocks.
 // Lines are slices specified as a ptr + len relative to a line buffer.
 // Therefore a block always refers to a contiguous array of lines.
 struct block {
-	struct block *prev;     // previous block
-	struct block *next;     // next block
-	slice *lines;           // first line of the block
+	buffer_index prev;     // previous block
+	buffer_index next;     // next block
+	buffer_index lines;     // first line of the block
 	i32 n_lines;            // number of lines in that block
 };
+typedef struct block block;
 
-inline i32 block_is_first(struct block *b)
+inline i32 block_is_first(block *b)
 {
-	return !b->prev;
+	return b->prev.offset < 0;
 }
 
-inline i32 block_is_last(struct block *b)
+inline i32 block_is_last(block *b)
 {
-	return !b->next;
+	return b->next.offset < 0;
 }
 
-// A buffer of blocks contiguous in memory.
-struct block_buffer {
-	struct block *blocks;
-	struct block *next;
-	i32 n_blocks;
-};
-
-struct block_buffer block_buffer_mk(void* ptr, size_t len)
+inline block* block_get_next(block *b, buffer *buf)
 {
-	return (struct block_buffer) {
-		.blocks    = ptr,
-		.next      = ptr,
-		.n_blocks  = len / sizeof(struct block_buffer), // remainder of ptr are wasted
-	};
+	return buffer_get_block(buf, b->next);
 }
 
-struct block *block_buffer_last(struct block_buffer *b)
+inline block* block_get_prev(block *b, buffer *buf)
 {
-	assert(b->blocks < b->next);
-	return b->next - 1;
+	return buffer_get_block(buf, b->prev);
 }
 
-struct block *block_buffer_assign(struct block_buffer *b)
+inline slice* block_get_line(block *b, i32 n, buffer *buf)
 {
-	assert(b->next < b->blocks + b->n_blocks);
-	return b->next++;
+	assert(0 <= n);
+	assert(n < b->n_lines);
+	return buffer_get_line(buf, buffer_index_offset(b->lines, n));
 }
+
 
 // A type of operation on a block buffer.
 enum block_op_type {
@@ -522,47 +495,13 @@ enum block_op_type {
 // For deletes, one block is swapped out and two blocks are swapped in.
 struct block_op {
 	enum block_op_type t;
-	struct block *new_blocks;
-	struct block *old_block;
+	buffer_index new_blocks; // TODO: is this necessary ? In practice the new blocks will always be
+	                         //       immediately assigned after that block_op.
+	buffer_index old_block;
+	buffer_index prev_op;
 };
 
-// A buffer of edit operations.
-struct block_op_history {
-	struct block_op *ops;
-	struct block_op *cursor;
-	struct block_op *last_op;
-	i32 n_ops_max;
-};
-
-struct block_op_history block_op_history_mk(void* ptr, size_t len)
-{
-	return (struct block_op_history) {
-		.ops	   = ptr,
-		.n_ops_max = len / sizeof(struct block_op),
-		.cursor    = 0,
-		.last_op   = 0,
-	};
-}
-
-struct block_op block_buffer_delete(struct block_buffer *b, struct block *del_block)
-{
-	struct block *new_upper_block = block_buffer_assign(b);
-	struct block *new_lower_block = block_buffer_assign(b);
-
-	new_upper_block->prev = del_block->prev;
-	new_upper_block->next = new_lower_block;
-
-	new_lower_block->prev = new_upper_block;
-	new_lower_block->next = del_block->next;
-
-	return (struct block_op) {
-		.t = BLOCK_DELETE,
-		.new_blocks = new_upper_block,
-		.old_block  = del_block,
-	};
-}
-
-_def_buffer_alloc(slice, struct slice);
+_def_buffer_alloc(line, struct slice);
 _def_buffer_alloc(block, struct block);
 _def_buffer_alloc(block_op, struct block_op);
 
@@ -609,66 +548,71 @@ void mapped_file_print(int out_fd, struct mapped_file *f)
 // All data relative to a text file representation in memory and insert/delete ops for undo/redo.
 struct filebuffer {
 	// TODO: mapped_file.name should be stored somewhere else in some index of name -> filebuffer
-	struct mapped_file         f;    // Mapped file, read only
-	struct buffer	           a;    // Buffer for insertions, append only.
-	struct line_buffer         l;    // Buffer for line slices pointing into 'f' or 'a'
-	struct block_buffer        b;    // Buffer for blocks of lines
-	// TODO: consider making this a ring buffer with bounded history length
-	struct block_op_history	   h;    // Buffer for history of block operations
+	struct mapped_file         file;	        // Mapped file, read only
+	struct buffer              insert_buffer;       // Insert buffer, append only.
+	struct buffer              object_buffer;       // Object buffer for line slices, blocks, block_ops.
+	buffer_index               last_op;             // Index into the buffer struct of the last ops.
+	// TODO: add metadata for redo !
 
-	struct block *b_first;
-	struct block *b_last;
+	// FIXME: convert to buffer_index
+	buffer_index b_first;
+	buffer_index b_last;
 };
 typedef struct filebuffer filebuffer;
 
 // A cursor into a filebuffer that can be moved line by line.
 // Careful: cursors get invalidated by inserts and deletes !
 struct filebuffer_cursor {
-	struct block *b;
-	i32 block_cursor;
+	buffer *buf;
+	block *blk;
+	i32 cursor;
 	i32 lineno;
 };
+typedef struct filebuffer_cursor filebuffer_cursor;
 
-inline struct filebuffer_cursor filebuffer_cursor_init(struct filebuffer *fb)
+inline filebuffer_cursor filebuffer_cursor_init(filebuffer *fb)
 {
-	return (struct filebuffer_cursor) {
-		.b = fb->b_first,
-		.block_cursor = -1,
+	return (filebuffer_cursor) {
+		.buf = &fb->object_buffer,
+		.blk = buffer_get_block(&fb->object_buffer, fb->b_first),
+		.cursor = -1,
 		.lineno = -1,
 	};
 }
 
-i32 filebuffer_cursor_next(struct filebuffer_cursor *c)
+i32 filebuffer_cursor_next(filebuffer_cursor *it)
 {
-	c->lineno++;
-	c->block_cursor++;
-	if (c->block_cursor == c->b->n_lines) {
-		if (block_is_last(c->b)) {
+	block *b = it->blk;
+	i32 c = ++it->cursor;
+	it->lineno++;
+	if (c == b->n_lines) {
+		if (block_is_last(b)) {
 			return 0;
 		}
-		c->b = c->b->next;
-		c->block_cursor = 0;
+		it->blk = block_get_next(b, it->buf);
+		it->cursor = 0;
 	}
 	return 1;
 }
 
-i32 filebuffer_cursor_prev(struct filebuffer_cursor *c)
+i32 filebuffer_cursor_prev(filebuffer_cursor *it)
 {
-	c->lineno--;
-	c->block_cursor--;
-	if (c->block_cursor == -1) {
-		if (block_is_first(c->b)) {
+	block *b = it->blk;
+	i32 c = it->cursor--;
+	it->lineno--;
+	if (c < 0) {
+		if (block_is_first(b)) {
 			return 0;
 		}
-		c->b = c->b->prev;
-		c->block_cursor = c->b->n_lines - 1;
+		it->blk = block_get_prev(b, it->buf);
+		it->cursor = b->n_lines - 1;
 	}
 	return 1;
 }
 
-inline slice filebuffer_cursor_get(struct filebuffer_cursor *c)
+inline slice filebuffer_cursor_get(filebuffer_cursor *it)
 {
-	return *(c->b->lines + c->block_cursor);
+	return *block_get_line(it->blk, it->cursor, it->buf);
 }
 
 
@@ -682,7 +626,7 @@ inline slice filebuffer_cursor_get(struct filebuffer_cursor *c)
 
 // Map a file in memory, scan content for finding all lines, prepare initial line block.
 static u64 filebuffer_alloc_base = Giga(256);
-static u64 filebuffer_alloc_span = Mega(8);
+static u64 filebuffer_alloc_span = Mega(64);
 static i32 filebuffer_alloc_n = 0;
 
 u64 filebuffer_init_next_addr() {
@@ -717,46 +661,54 @@ u64 filebuffer_init_next_addr() {
 //         - when top and bottom are about to collide, move everything into a bigger block
 //	     - actually only the top block can be moved up with a single memmove once the upper regions
 //	     - is reallocated
-void filebuffer_init(struct filebuffer *fb)
+void filebuffer_init(filebuffer *fb)
 {
 	u64 addr = filebuffer_init_next_addr();
-	u8 *ptr = v_alloc(addr, filebuffer_alloc_span);
-	_fail_if(ptr == NULL, "filebuffer_alloc: v_alloc failed %lu\n", addr);
+	u64 base_append_buffer = addr;
+	u64 base_object_buffer = addr + Mega(32);
 
-	u8 *base_history_buffer       = ptr;
-	u8 *base_line_buffer          = ptr + Mega(2);
-	u8 *base_block_buffer         = ptr + Mega(4);
-	u8 *base_append_buffer        = ptr + Mega(6);
+	size_t len = Kilo(64);
 
-	fb->a = buffer_mk(base_append_buffer, Mega(2));
-	fb->l = line_buffer_mk(base_line_buffer, Mega(2));
-	fb->b = block_buffer_mk(base_block_buffer, Mega(2));
-	fb->h = block_op_history_mk(base_history_buffer, Mega(2));
+	u8 *append_buffer_ptr = v_alloc(base_append_buffer, len);
+	u8 *object_buffer_ptr = v_alloc(base_object_buffer, len);
+
+	_fail_if(append_buffer_ptr == NULL, "filebuffer_alloc: v_alloc failed %lu\n", base_append_buffer);
+	_fail_if(object_buffer_ptr == NULL, "filebuffer_alloc: v_alloc failed %lu\n", base_object_buffer);
+
+	buffer object_buffer = buffer_mk(append_buffer_ptr , len);
+	buffer insert_buffer = buffer_mk(object_buffer_ptr , len);
+	fb->insert_buffer = object_buffer;
+	fb->object_buffer = insert_buffer;
 
 	int z;
-	z = mapped_file_load(&fb->f);
+	z = mapped_file_load(&fb->file);
 	assert(z == 0);
 
-	slice s = fb->f.data;
-	while (slice_len(s)) {
-		*line_buffer_assign(&fb->l) = slice_split(&s, '\n');
-	}
-
-	// Link initial blocks together
-	struct block *b = block_buffer_assign(&fb->b);
-	fb->b_first = b;
-	fb->b_last = b;
-
 	// Assign initial block of lines
-	b->lines = fb->l.lines;
-	b->n_lines = line_buffer_used(&fb->l);
-	b->prev = NULL;
-	b->next = NULL;
+	buffer_index first_block = buffer_alloc_block(&object_buffer);
+	fb->b_first = first_block;
+	fb->b_last = first_block;
+
+	block *b = buffer_get_block(&object_buffer, first_block);
+	b->prev = buffer_index_invalid;
+	b->next = buffer_index_invalid;
+
+	// Scan file for initial line slices and block setup.
+	slice s = fb->file.data;
+	while (slice_len(s)) {
+		buffer_index l = buffer_alloc_line(&object_buffer);
+		if (b->n_lines == 0) {
+			b->lines = l;
+		}
+		b->n_lines++;
+
+		*buffer_get_line(&object_buffer, l) = slice_split(&s, '\n');
+	}
 }
 
-void filebuffer_save(struct filebuffer *fb, int fd)
+void filebuffer_save(filebuffer *fb, int fd)
 {
-	struct filebuffer_cursor c = filebuffer_cursor_init(fb);
+	filebuffer_cursor c = filebuffer_cursor_init(fb);
 	while (filebuffer_cursor_next(&c)) {
 		slice_write(fd, filebuffer_cursor_get(&c));
 	}
@@ -974,39 +926,37 @@ slice input_capture(slice buffer)
 
 
 
+/* MAIN and TESTS */
 
-#define print_sizeof(str_name) 	printf("sizeof(%s)= %luB\n", #str_name, sizeof(str_name))
+static char buf[1024] = {};
 
-int main(int argc, char **args)
+void test_valloc()
 {
-	logs = fopen(logs_path, "w");
-	assert(logs > 0);
-
-	printf("logs address: %p\n", &logs);
-
-	print_sizeof(struct filebuffer);
-	print_sizeof(struct buffer);
-	print_sizeof(struct block_op);
-
-	puts("hello chizel !!");
-	fputs("hello chizel !!\n", logs);
-
 	u64 addr_base = 0xffff000000;
 	void* addr = v_alloc(addr_base, PageSize * 12*32);
 	//void* addr = v_alloc(addr, 262144*32);
 	_fail_if(addr == NULL, "v_alloc (mmap) failed: %s", strerror(errno));
+}
 
+void test_sizeof()
+{
+	print_sizeof(filebuffer);
+	print_sizeof(buffer);
+}
+
+void test_mapped_file()
+{
 	struct mapped_file f = {
 		.name =
 			"/Users/hugobenichi/Desktop/editor/czl/Makefile",
 			//__FILE__,
 	};
 	mapped_file_load(&f);
-
 	mapped_file_print(STDOUT_FILENO, &f);
+}
 
-
-
+void test_vec_rec()
+{
 	rec r0 = r(v(1, 4), v(8, 9));
 	vec v1 = v(5, 6);
 	vec v2 = v(3, 2);
@@ -1018,8 +968,6 @@ int main(int argc, char **args)
 	vec v4 = sub(v3, v2);
 	rec r3 = sub(r2, v3);
 
-	char buf[1024] = {};
-
 	*vec_print(buf, 1024, v1) = 0;     puts(buf);
 	*vec_print(buf, 1024, v2) = 0;     puts(buf);
 	*vec_print(buf, 1024, v3) = 0;     puts(buf);
@@ -1030,17 +978,12 @@ int main(int argc, char **args)
 	*rec_print(buf, 1024, r2) = 0;     puts(buf);
 	*rec_print(buf, 1024, r3) = 0;     puts(buf);
 
-	print_sizeof(struct block);
-	print_sizeof(struct slice);
+}
 
-//	for (;;) {
-//		char* end = key_print(buf, 1024, read_input());
-//		*end = 0;
-//		puts(buf);
-//	}
-
+void test_filebuffer()
+{
 	struct filebuffer fb = {
-		.f.name = "/Users/hugobenichi/Desktop/editor/czl/Makefile",
+		.file.name = "/Users/hugobenichi/Desktop/editor/czl/Makefile",
 	};
 	filebuffer_init(&fb);
 
@@ -1048,15 +991,29 @@ int main(int argc, char **args)
 	int fd = open(file, O_RDWR|O_CREAT, 0644);
 	filebuffer_save(&fb, fd);
 	close(fd);
+}
 
+void test_term()
+{
 	term_raw();
 	struct key_input k = read_input();
 
 	snprintf(buf, 1024, "read_input: %d\n", k.c);
 	fputs(buf, logs);
 	puts(buf);
+}
 
-	if (0) {
+void test_echo()
+{
+	for (;;) {
+		char* end = key_print(buf, 1024, read_input());
+		*end = 0;
+		puts(buf);
+	}
+}
+
+void test_inputcapture()
+{
 	slice s = {
 		.start = (u8*) buf,
 		.stop  = (u8*) buf + 1024,
@@ -1064,8 +1021,24 @@ int main(int argc, char **args)
 	slice input = input_capture(s);
 	write(STDIN_FILENO, (char*) input.start, input.stop - input.start);
 	puts("");
-	}
+}
+
+int main(int argc, char **args)
+{
+	logs = fopen(logs_path, "w");
+	assert(logs > 0);
+	fputs("hello chizel !!\n", logs);
+
+	//test_valloc();
+	//test_sizeof();
+	//test_mapped_file();
+	//test_vec_rec();
+	test_filebuffer();
+	//test_term();
+	//test_echo();
+	//test_inputcapture();
 
 	fflush(logs);
 	fclose(logs);
 }
+
