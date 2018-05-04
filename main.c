@@ -352,7 +352,7 @@ static const buffer_index buffer_index_invalid = {
 inline buffer_index buffer_index_mk(i32 o) {
 	assert(0 <= o);
 	return (buffer_index) {
-		.offset = 0,
+		.offset = o,
 	};
 }
 
@@ -411,7 +411,7 @@ _def_buffer_getter(block_op, struct block_op*);
 struct slice {
 	u8 *start;     // inclusive
 	u8 *stop;      // exclusive
-};
+}; // 16B
 typedef struct slice slice;
 
 int slice_write(int fd, slice s)
@@ -453,7 +453,7 @@ struct block {
 	buffer_index next;     // next block
 	buffer_index lines;     // first line of the block
 	i32 n_lines;            // number of lines in that block
-};
+}; // 16B
 typedef struct block block;
 
 inline i32 block_is_first(block *b)
@@ -479,8 +479,8 @@ inline block* block_get_prev(block *b, buffer *buf)
 inline slice* block_get_line(block *b, i32 n, buffer *buf)
 {
 	assert(0 <= n);
-	assert(n < b->n_lines);
-	return buffer_get_line(buf, buffer_index_offset(b->lines, n));
+	_fail_if(n >= b->n_lines, "block_get_line: %d was not less than b->n_lines=%d\n", n, b->n_lines);
+	return buffer_get_line(buf, b->lines) + n;
 }
 
 
@@ -499,7 +499,7 @@ struct block_op {
 	                         //       immediately assigned after that block_op.
 	buffer_index old_block;
 	buffer_index prev_op;
-};
+}; // 16B
 
 _def_buffer_alloc(line, struct slice);
 _def_buffer_alloc(block, struct block);
@@ -610,7 +610,7 @@ i32 filebuffer_cursor_prev(filebuffer_cursor *it)
 	return 1;
 }
 
-inline slice filebuffer_cursor_get(filebuffer_cursor *it)
+slice filebuffer_cursor_get(filebuffer_cursor *it)
 {
 	return *block_get_line(it->blk, it->cursor, it->buf);
 }
@@ -675,34 +675,33 @@ void filebuffer_init(filebuffer *fb)
 	_fail_if(append_buffer_ptr == NULL, "filebuffer_alloc: v_alloc failed %lu\n", base_append_buffer);
 	_fail_if(object_buffer_ptr == NULL, "filebuffer_alloc: v_alloc failed %lu\n", base_object_buffer);
 
-	buffer object_buffer = buffer_mk(append_buffer_ptr , len);
-	buffer insert_buffer = buffer_mk(object_buffer_ptr , len);
-	fb->insert_buffer = object_buffer;
-	fb->object_buffer = insert_buffer;
+	fb->insert_buffer = buffer_mk(append_buffer_ptr , len);
+	fb->object_buffer = buffer_mk(object_buffer_ptr , len);
 
 	int z;
 	z = mapped_file_load(&fb->file);
 	assert(z == 0);
 
 	// Assign initial block of lines
-	buffer_index first_block = buffer_alloc_block(&object_buffer);
+	buffer_index first_block = buffer_alloc_block(&fb->object_buffer);
 	fb->b_first = first_block;
 	fb->b_last = first_block;
 
-	block *b = buffer_get_block(&object_buffer, first_block);
+	block *b = buffer_get_block(&fb->object_buffer, first_block);
 	b->prev = buffer_index_invalid;
 	b->next = buffer_index_invalid;
 
 	// Scan file for initial line slices and block setup.
 	slice s = fb->file.data;
 	while (slice_len(s)) {
-		buffer_index l = buffer_alloc_line(&object_buffer);
+		buffer_index l_idx = buffer_alloc_line(&fb->object_buffer);
 		if (b->n_lines == 0) {
-			b->lines = l;
+			b->lines = l_idx;
 		}
 		b->n_lines++;
 
-		*buffer_get_line(&object_buffer, l) = slice_split(&s, '\n');
+		slice *l = buffer_get_line(&fb->object_buffer, l_idx);
+		*l = slice_split(&s, '\n');
 	}
 }
 
