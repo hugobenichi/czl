@@ -15,12 +15,49 @@
 #include <sys/stat.h>
 
 
+
+/* VARIOUS MACRO UTILS */
+
+#define _numargs(...)  (sizeof((int[]){__VA_ARGS__})/sizeof(int))
+#define print_sizeof(str_name) 	printf("sizeof(%s)= %luB\n", #str_name, sizeof(str_name))
+
+#define Kilo(x) (1024L * (x))
+#define Mega(x) (1024L * Kilo(x))
+#define Giga(x) (1024L * Mega(x))
+
+#define _local static
+#define _global static
+
 #define _stringize2(x) #x
 #define _stringize(x) _stringize2(x)
 #define _source_loc() __FILE__ ":" _stringize(__LINE__)
 
-#define _local static
-#define _global static
+// Careful: the result expr gets evaluated twice
+#define _max(x,y) ((x) > (y) ? : (x) : (y))
+#define _min(x,y) ((x) < (y) ? : (x) : (y))
+
+
+// TODO: eventually move these signatures to header ?
+/* check that given boolean is true, otherwise print format string and exit */
+void fail_at_location_if(int has_failed, const char *loc, const char * msg, ...);
+#define _fail_if(has_failed, msg, args...) fail_at_location_if(has_failed, _source_loc(), msg, args)
+
+void fail_at_location_if(int has_failed, const char *loc, const char * msg, ...)
+{
+	if (!has_failed) {
+		return;
+	}
+	fprintf(stderr, "%s[ ", loc);
+        va_list args;
+        va_start(args, msg);
+        vfprintf(stderr, msg, args);
+        va_end(args);
+        fprintf(stderr, "\n");
+        exit(1);
+}
+
+
+
 
 
 static const char logs_path[] = "/tmp/czl.log";
@@ -37,10 +74,6 @@ typedef uint8_t   u8;
 typedef uint16_t  u16;
 typedef uint32_t  u32;
 typedef uint64_t  u64;
-
-// Careful: the result expr gets evaluated twice
-#define _max(x,y) ((x) > (y) ? : (x) : (y))
-#define _min(x,y) ((x) < (y) ? : (x) : (y))
 
 // geom primitive types
 struct vec {
@@ -161,34 +194,9 @@ char* rec_print(char *dst, size_t len, rec r)
 
 /* BASE MEMORY UTILS */
 
-#define print_sizeof(str_name) 	printf("sizeof(%s)= %luB\n", #str_name, sizeof(str_name))
-
-#define Kilo(x) (1024L * (x))
-#define Mega(x) (1024L * Kilo(x))
-#define Giga(x) (1024L * Mega(x))
-
 
 // TODO: regroup in header of constant values / platform values
 static const size_t PageSize = 0x1000;
-
-// TODO: eventually move these signatures to header ?
-/* check that given boolean is true, otherwise print format string and exit */
-void fail_at_location_if(int has_failed, const char *loc, const char * msg, ...);
-#define _fail_if(has_failed, msg, args...) fail_at_location_if(has_failed, _source_loc(), msg, args)
-
-void fail_at_location_if(int has_failed, const char *loc, const char * msg, ...)
-{
-	if (!has_failed) {
-		return;
-	}
-	fprintf(stderr, "%s[ ", loc);
-        va_list args;
-        va_start(args, msg);
-        vfprintf(stderr, msg, args);
-        va_end(args);
-        fprintf(stderr, "\n");
-        exit(1);
-}
 
 void* v_alloc(u64 base_addr_lit, size_t size)
 {
@@ -449,8 +457,9 @@ slice slice_split(slice *s, i32 sep)
 // Lines are slices specified as a ptr + len relative to a line buffer.
 // Therefore a block always refers to a contiguous array of lines.
 struct block {
-	buffer_index prev;     // previous block
-	buffer_index next;     // next block
+	buffer_index prev;      // previous block
+	buffer_index next;      // next block
+	// TODO: introduce a line segment struct { buffer_index, n_lines } with helper ops like subslice
 	buffer_index lines;     // first line of the block
 	i32 n_lines;            // number of lines in that block
 }; // 16B
@@ -498,8 +507,9 @@ struct block_op {
 	buffer_index new_blocks; // TODO: is this necessary ? In practice the new blocks will always be
 	                         //       immediately assigned after that block_op.
 	buffer_index old_block;
-	buffer_index prev_op;
+	buffer_index last_op;
 }; // 16B
+typedef struct block_op block_op;
 
 _def_buffer_alloc(line, struct slice);
 _def_buffer_alloc(block, struct block);
@@ -567,6 +577,7 @@ struct filebuffer_cursor {
 	block *blk;
 	i32 cursor;
 	i32 lineno;
+	// TODO: add horizontal position into line
 };
 typedef struct filebuffer_cursor filebuffer_cursor;
 
@@ -609,6 +620,8 @@ i32 filebuffer_cursor_prev(filebuffer_cursor *it)
 	}
 	return 1;
 }
+
+// TODO: add next_char, prev_char movement !
 
 slice filebuffer_cursor_get(filebuffer_cursor *it)
 {
@@ -711,6 +724,106 @@ void filebuffer_save(filebuffer *fb, int fd)
 	while (filebuffer_cursor_next(&c)) {
 		slice_write(fd, filebuffer_cursor_get(&c));
 	}
+}
+
+inline void block_link(buffer *buf, buffer_index upper, buffer_index lower)
+{
+	buffer_get_block(buf, upper)->next = lower;
+	buffer_get_block(buf, lower)->prev = upper;
+}
+
+void block_link_all_proto(buffer *buf, int n, ...)
+{
+    va_list ap;
+    va_start(ap, n);
+    buffer_index prev = va_arg(ap, buffer_index);
+    for (int i = 1; i < n; i++) {
+	buffer_index next = va_arg(ap, buffer_index);
+        block_link(buf, prev, next);
+	prev = next;
+    }
+    va_end(ap);
+}
+
+// FIXME: make this work
+#define block_link_all(buf, ...) block_link_all_proto(buf, _numargs(__VA_ARGS__), __VA_ARGS__)
+
+buffer_index block_copy(buffer *buf, block* b)
+{
+	buffer_index copy = buffer_alloc_block(buf);
+
+	block_link(buf, b->prev, copy);
+	block_link(buf, copy, b->next);
+	// TODO: use line_segment when available
+	buffer_get_block(buf, copy)->lines = b->lines;
+	buffer_get_block(buf, copy)->n_lines = b->n_lines;
+
+	return copy;
+}
+
+// Truncate a block and create a new block holding the truncated part.
+// Both blocks needs to have at least one line each.
+buffer_index block_split(buffer *buf, block *upper, i32 n)
+{
+	// 'n' can only take 'n_lines - 1' values in [1, n_lines[
+	assert(0 < n);
+	assert(n < upper->n_lines);
+
+	buffer_index upper_idx = buffer_ptr_to_index(buf, upper);
+	buffer_index lower_idx = buffer_alloc_block(buf);
+
+	block_link(buf, upper_idx, lower_idx);
+	block_link(buf, lower_idx, upper->next);
+
+	// TODO: use line_segment when available
+
+	block* lower = buffer_get_block(buf, lower_idx);
+	lower->lines = buffer_index_offset(upper->lines, n * sizeof(slice));
+	lower->n_lines = upper->n_lines - n;
+	upper->n_lines = n;
+
+	return lower_idx;
+}
+
+/*
+ * INSERTS: - an insert into the block list happens into a valid block at a valid
+ *          position within that block.
+ *          - the insert pushes a new BLOCK_INSERT op into the object buffer,
+ *          and then creates either 2 or 3 new blocks depending if the insert
+ *          happens at a block boundary or not.
+ *          - the new blocks are swapped into the list in place of the old block
+ */
+void filebuffer_insert_start(filebuffer *fb, filebuffer_cursor *c)
+{
+	buffer* buf = &fb->object_buffer;
+
+	buffer_index op_idx = buffer_alloc_block_op(buf);
+
+	buffer_index upper = block_copy(buf, c->blk);
+	buffer_index insert;
+	buffer_index lower;
+
+	i32 max_split = c->blk->n_lines - 1;
+	if (max_split ==  0) {
+		insert = upper;
+	} else if (c->cursor == 0) {
+		lower = block_split(buf, c->blk, 1);
+		insert = upper;
+	} else if (c->cursor == max_split) {
+		lower = block_split(buf, c->blk, max_split);
+		insert = lower;
+	} else {
+		insert = block_split(buf, c->blk, c->cursor);
+		lower = block_split(buf, buffer_get_block(buf, insert), 1);
+	}
+
+	block_op* op = buffer_get_block_op(buf, op_idx);
+	op->t = BLOCK_INSERT;
+	op->new_blocks = insert; // CHECK: or use 'upper' ?
+	op->old_block = buffer_ptr_to_index(buf, c->blk);
+	op->last_op = fb->last_op;
+
+	// copy the insert line
 }
 
 
