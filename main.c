@@ -304,7 +304,7 @@ void term_raw()
 
 
 
-/* FILEBUFFER and TEXT MANAGEMENT */
+/* OBJECT BUFFER AND MEMORY MANAGEMENT */
 
 // A chunk of memory with a moving cursor. Invariant: start <= cursor <= cursor.
 struct buffer {
@@ -348,14 +348,14 @@ void buffer_append1(buffer *b, u8 c)
 	buffer_append(b, &c, 1);
 }
 
+
+// An index into a struct buffer specified as an offset relative to that buffer beginning.
 struct buffer_index {
 	i32 offset;
 };
 typedef struct buffer_index buffer_index;
 
-static const buffer_index buffer_index_invalid = {
-	.offset = -1,
-};
+static const buffer_index buffer_index_invalid = { .offset = -1 };
 
 inline buffer_index buffer_index_mk(i32 o) {
 	assert(0 <= o);
@@ -407,6 +407,16 @@ inline buffer_index buffer_alloc(buffer *b, size_t len)
 	}
 
 
+// TODO:
+//       1) change 'buffer_index' to 'obj'
+//       2) change buffer to 'arena', add metadata
+//       3) add obj_array
+//       4) add obj_slice
+
+
+
+/* FILEBUFFER and TEXT MANAGEMENT */
+
 struct slice;
 struct block;
 struct block_op;
@@ -450,39 +460,24 @@ slice slice_split(slice *s, i32 sep)
 	return front;
 }
 
-// TODO: slice helper fns for 1) appending char, 2) subslicing
+// TODO: slice helper fns for 1) appending/inserting char, 2) subslicing
 
 
-// A block of lines, chained with its neighboring blocks.
+// A block of lines.
 // Lines are slices specified as a ptr + len relative to a line buffer.
 // Therefore a block always refers to a contiguous array of lines.
 struct block {
-	buffer_index prev;      // previous block
-	buffer_index next;      // next block
-	// TODO: introduce a line segment struct { buffer_index, n_lines } with helper ops like subslice
+	buffer_index next;
+	// TODO: replace by line_slice
 	buffer_index lines;     // first line of the block
 	i32 n_lines;            // number of lines in that block
-}; // 16B
+}; // 8B
 typedef struct block block;
 
-inline i32 block_is_first(block *b)
-{
-	return b->prev.offset < 0;
-}
 
-inline i32 block_is_last(block *b)
-{
-	return b->next.offset < 0;
-}
-
-inline block* block_get_next(block *b, buffer *buf)
+inline block* block_next(block *b, buffer *buf)
 {
 	return buffer_get_block(buf, b->next);
-}
-
-inline block* block_get_prev(block *b, buffer *buf)
-{
-	return buffer_get_block(buf, b->prev);
 }
 
 inline slice* block_get_line(block *b, i32 n, buffer *buf)
@@ -492,6 +487,17 @@ inline slice* block_get_line(block *b, i32 n, buffer *buf)
 	return buffer_get_line(buf, b->lines) + n;
 }
 
+
+struct text_cursor {
+	buffer_index prev;
+	buffer_index next;
+	// TODO: replace with line_slice
+	buffer_index lines;     // first line of the block
+	i32 n_lines;            // number of lines in that block
+	i32 line_offset;
+	vec position;
+};
+typedef struct text_cursor text_cursor;
 
 // A type of operation on a block buffer.
 enum block_op_type {
@@ -581,6 +587,9 @@ struct filebuffer_cursor {
 };
 typedef struct filebuffer_cursor filebuffer_cursor;
 
+
+/* TODO: this whole part needs to be translated in term of text_cursor !
+
 inline filebuffer_cursor filebuffer_cursor_init(filebuffer *fb)
 {
 	return (filebuffer_cursor) {
@@ -627,6 +636,8 @@ slice filebuffer_cursor_get(filebuffer_cursor *it)
 {
 	return *block_get_line(it->blk, it->cursor, it->buf);
 }
+
+*/
 
 
 // filebuffer TODOs:
@@ -701,8 +712,10 @@ void filebuffer_init(filebuffer *fb)
 	fb->b_last = first_block;
 
 	block *b = buffer_get_block(&fb->object_buffer, first_block);
+	/* FIXME
 	b->prev = buffer_index_invalid;
 	b->next = buffer_index_invalid;
+	*/
 
 	// Scan file for initial line slices and block setup.
 	slice s = fb->file.data;
@@ -720,40 +733,30 @@ void filebuffer_init(filebuffer *fb)
 
 void filebuffer_save(filebuffer *fb, int fd)
 {
+	/* FIXME
 	filebuffer_cursor c = filebuffer_cursor_init(fb);
 	while (filebuffer_cursor_next(&c)) {
 		slice_write(fd, filebuffer_cursor_get(&c));
 	}
+	*/
 }
 
 inline void block_link(buffer *buf, buffer_index upper, buffer_index lower)
 {
+	/* FIXME
 	buffer_get_block(buf, upper)->next = lower;
 	buffer_get_block(buf, lower)->prev = upper;
+	*/
 }
-
-void block_link_all_proto(buffer *buf, int n, ...)
-{
-    va_list ap;
-    va_start(ap, n);
-    buffer_index prev = va_arg(ap, buffer_index);
-    for (int i = 1; i < n; i++) {
-	buffer_index next = va_arg(ap, buffer_index);
-        block_link(buf, prev, next);
-	prev = next;
-    }
-    va_end(ap);
-}
-
-// FIXME: make this work
-#define block_link_all(buf, ...) block_link_all_proto(buf, _numargs(__VA_ARGS__), __VA_ARGS__)
 
 buffer_index block_copy(buffer *buf, block* b)
 {
 	buffer_index copy = buffer_alloc_block(buf);
 
+	/* FIXME
 	block_link(buf, b->prev, copy);
 	block_link(buf, copy, b->next);
+	*/
 	// TODO: use line_segment when available
 	buffer_get_block(buf, copy)->lines = b->lines;
 	buffer_get_block(buf, copy)->n_lines = b->n_lines;
