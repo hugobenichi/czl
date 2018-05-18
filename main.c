@@ -350,66 +350,143 @@ void buffer_append1(buffer *b, u8 c)
 
 
 // An index into a struct buffer specified as an offset relative to that buffer beginning.
-struct buffer_index {
+struct obj {
 	i32 offset;
 };
-typedef struct buffer_index buffer_index;
+typedef struct obj obj;
 
-static const buffer_index buffer_index_invalid = { .offset = -1 };
+static const obj obj_invalid = { .offset = -1 };
 
-inline buffer_index buffer_index_mk(i32 o) {
+i32 obj_is_valid(obj o) {
+	return o.offset >= 0;
+}
+
+inline obj obj_mk(i32 o) {
 	assert(0 <= o);
-	return (buffer_index) {
+	return (obj) {
 		.offset = o,
 	};
 }
 
-inline buffer_index buffer_index_offset(buffer_index i, i32 o)
+inline obj obj_offset(obj i, i32 o)
 {
-	return buffer_index_mk(i.offset + o);
+	return obj_mk(i.offset + o);
 }
 
-inline void* buffer_index_to_ptr(buffer *b, buffer_index i)
+inline void* obj_to_ptr(buffer *b, obj i)
 {
 	return (void*) (b->start + i.offset);
 }
 
-inline buffer_index buffer_ptr_to_index(buffer *b, void* ptr)
+inline obj buffer_ptr_to_index(buffer *b, void* ptr)
 {
 	u8* addr = ptr;
 	assert(b->start <= addr);
 	assert(addr < b->stop);
-	return buffer_index_mk((i32) (addr - b->start));
+	return obj_mk((i32) (addr - b->start));
 }
 
-inline buffer_index buffer_get_top_index(buffer *b)
+inline obj buffer_get_top_index(buffer *b)
 {
 	return buffer_ptr_to_index(b, b->cursor);
 }
 
-inline buffer_index buffer_alloc(buffer *b, size_t len)
+inline obj buffer_alloc(buffer *b, size_t len)
 {
 	assert(b->cursor + len <= b->stop);
-	buffer_index idx = buffer_get_top_index(b);
+	obj idx = buffer_get_top_index(b);
 	b->cursor += len;
 	return idx;
 }
 
 #define _def_buffer_getter(name, ptr_t)                                         \
-	inline ptr_t buffer_get_ ## name (buffer *b_ptr, buffer_index b_idx)    \
+	inline ptr_t buffer_get_ ## name (buffer *b_ptr, obj b_idx)    \
 	{                                                                       \
-		return (ptr_t) buffer_index_to_ptr(b_ptr, b_idx);               \
+		return (ptr_t) obj_to_ptr(b_ptr, b_idx);               \
 	}
 
+_def_buffer_getter(i32, i32*)
+
 #define _def_buffer_alloc(name, t)                                              \
-	inline buffer_index buffer_alloc_ ## name (buffer *b_ptr) {             \
+	inline obj buffer_alloc_ ## name (buffer *b_ptr) {             \
 		return buffer_alloc(b_ptr, sizeof(t));                                 \
 	}
 
+struct arena {
+	// TODO: change buffer to 'arena' and merge both together
+	buffer buf;
+
+	obj array;
+};
+typedef struct arena arena;
+
+#define _arena_buffer(a) (&a->buf)
+
+void arena_array_start(arena *a, i32 stride)
+{
+	assert(stride > 0);
+	assert(!obj_is_valid(a->array));
+	a->array = buffer_alloc(_arena_buffer(a), 4); // initial header start
+}
+
+inline obj arena_array_append(arena *a, i32 stride)
+{
+	assert(stride > 0);
+	assert(obj_is_valid(a->array));
+	return buffer_alloc(_arena_buffer(a), stride);
+}
+
+obj arena_array_finalize(arena *a, i32 stride)
+{
+	assert(stride > 0);
+	assert(obj_is_valid(a->array));
+
+	obj s = a->array;
+	obj e = buffer_get_top_index(_arena_buffer(a));
+	i32 l = (e.offset - s.offset) / stride;
+	*((i32*) obj_to_ptr(_arena_buffer(a), s)) = l;
+
+	a->array = obj_invalid;
+	return s;
+}
+
+// assume that _def_buffer_getter(name, type) has been expanded.
+#define _def_obj_array(name, type) \
+struct name ## _array { \
+	i32 len; \
+	type objs[]; \
+}; \
+typedef struct name ## _array name ## _array; \
+void name ## _array_start(arena *a) \
+{ \
+	arena_array_start(a, sizeof(type)); \
+} \
+type* name ## _array_append(arena *a) \
+{ \
+	return (type*) obj_to_ptr(_arena_buffer(a), arena_array_append(a, sizeof(type))); \
+} \
+name ## _array* name ## _array_finalize(arena *a) \
+{ \
+	return (name ## _array*) obj_to_ptr(_arena_buffer(a), arena_array_finalize(a, sizeof(type))); \
+} \
+i32 name ## _array_len(name ## _array* ary) \
+{ \
+	return ary->len; \
+}
+
+slice
+
+FOO_slice FOO_slice_wrap(arena *a, obj ary)
+{
+	return (FOO_slice) {
+		.start = obj;
+		.len   = FOO_array_len(
+	};
+}
+
+
 
 // TODO:
-//       1) change 'buffer_index' to 'obj'
-//       2) change buffer to 'arena', add metadata
 //       3) add obj_array
 //       4) add obj_slice
 
@@ -431,6 +508,8 @@ struct slice {
 	u8 *stop;      // exclusive
 }; // 16B
 typedef struct slice slice;
+
+_def_obj_array(line, slice);
 
 int slice_write(int fd, slice s)
 {
@@ -460,17 +539,32 @@ slice slice_split(slice *s, i32 sep)
 	return front;
 }
 
+
+
 // TODO: slice helper fns for 1) appending/inserting char, 2) subslicing
+
+// A contiguous array of line slices into a buffer
+struct lines {
+	obj start;
+	len len;
+};
+typedef struct lines lines;
+
+slice* lines_get(buffer *buf, lines ls, i32 n)
+{
+	assert(0 <= n);
+	assert(n < ls.len);
+	return buffer_get_line(buf, ls.start) + n;
+}
 
 
 // A block of lines.
 // Lines are slices specified as a ptr + len relative to a line buffer.
 // Therefore a block always refers to a contiguous array of lines.
 struct block {
-	buffer_index next;
+	obj next;
+	lines lines;
 	// TODO: replace by line_slice
-	buffer_index lines;     // first line of the block
-	i32 n_lines;            // number of lines in that block
 }; // 8B
 typedef struct block block;
 
@@ -489,10 +583,10 @@ inline slice* block_get_line(block *b, i32 n, buffer *buf)
 
 
 struct text_cursor {
-	buffer_index prev;
-	buffer_index next;
+	obj prev;
+	obj next;
 	// TODO: replace with line_slice
-	buffer_index lines;     // first line of the block
+	obj lines;     // first line of the block
 	i32 n_lines;            // number of lines in that block
 	i32 line_offset;
 	vec position;
@@ -510,10 +604,10 @@ enum block_op_type {
 // For deletes, one block is swapped out and two blocks are swapped in.
 struct block_op {
 	enum block_op_type t;
-	buffer_index new_blocks; // TODO: is this necessary ? In practice the new blocks will always be
+	obj new_blocks; // TODO: is this necessary ? In practice the new blocks will always be
 	                         //       immediately assigned after that block_op.
-	buffer_index old_block;
-	buffer_index last_op;
+	obj old_block;
+	obj last_op;
 }; // 16B
 typedef struct block_op block_op;
 
@@ -567,12 +661,11 @@ struct filebuffer {
 	struct mapped_file         file;	        // Mapped file, read only
 	struct buffer              insert_buffer;       // Insert buffer, append only.
 	struct buffer              object_buffer;       // Object buffer for line slices, blocks, block_ops.
-	buffer_index               last_op;             // Index into the buffer struct of the last ops.
+	obj               last_op;             // Index into the buffer struct of the last ops.
 	// TODO: add metadata for redo !
 
-	// FIXME: convert to buffer_index
-	buffer_index b_first;
-	buffer_index b_last;
+	obj b_first;
+	obj b_last;
 };
 typedef struct filebuffer filebuffer;
 
@@ -707,20 +800,20 @@ void filebuffer_init(filebuffer *fb)
 	assert(z == 0);
 
 	// Assign initial block of lines
-	buffer_index first_block = buffer_alloc_block(&fb->object_buffer);
+	obj first_block = buffer_alloc_block(&fb->object_buffer);
 	fb->b_first = first_block;
 	fb->b_last = first_block;
 
 	block *b = buffer_get_block(&fb->object_buffer, first_block);
 	/* FIXME
-	b->prev = buffer_index_invalid;
-	b->next = buffer_index_invalid;
+	b->prev = obj_invalid;
+	b->next = obj_invalid;
 	*/
 
 	// Scan file for initial line slices and block setup.
 	slice s = fb->file.data;
 	while (slice_len(s)) {
-		buffer_index l_idx = buffer_alloc_line(&fb->object_buffer);
+		obj l_idx = buffer_alloc_line(&fb->object_buffer);
 		if (b->n_lines == 0) {
 			b->lines = l_idx;
 		}
@@ -741,7 +834,7 @@ void filebuffer_save(filebuffer *fb, int fd)
 	*/
 }
 
-inline void block_link(buffer *buf, buffer_index upper, buffer_index lower)
+inline void block_link(buffer *buf, obj upper, obj lower)
 {
 	/* FIXME
 	buffer_get_block(buf, upper)->next = lower;
@@ -749,9 +842,9 @@ inline void block_link(buffer *buf, buffer_index upper, buffer_index lower)
 	*/
 }
 
-buffer_index block_copy(buffer *buf, block* b)
+obj block_copy(buffer *buf, block* b)
 {
-	buffer_index copy = buffer_alloc_block(buf);
+	obj copy = buffer_alloc_block(buf);
 
 	/* FIXME
 	block_link(buf, b->prev, copy);
@@ -766,14 +859,14 @@ buffer_index block_copy(buffer *buf, block* b)
 
 // Truncate a block and create a new block holding the truncated part.
 // Both blocks needs to have at least one line each.
-buffer_index block_split(buffer *buf, block *upper, i32 n)
+obj block_split(buffer *buf, block *upper, i32 n)
 {
 	// 'n' can only take 'n_lines - 1' values in [1, n_lines[
 	assert(0 < n);
 	assert(n < upper->n_lines);
 
-	buffer_index upper_idx = buffer_ptr_to_index(buf, upper);
-	buffer_index lower_idx = buffer_alloc_block(buf);
+	obj upper_idx = buffer_ptr_to_index(buf, upper);
+	obj lower_idx = buffer_alloc_block(buf);
 
 	block_link(buf, upper_idx, lower_idx);
 	block_link(buf, lower_idx, upper->next);
@@ -781,7 +874,7 @@ buffer_index block_split(buffer *buf, block *upper, i32 n)
 	// TODO: use line_segment when available
 
 	block* lower = buffer_get_block(buf, lower_idx);
-	lower->lines = buffer_index_offset(upper->lines, n * sizeof(slice));
+	lower->lines = obj_offset(upper->lines, n * sizeof(slice));
 	lower->n_lines = upper->n_lines - n;
 	upper->n_lines = n;
 
@@ -800,11 +893,11 @@ void filebuffer_insert_start(filebuffer *fb, filebuffer_cursor *c)
 {
 	buffer* buf = &fb->object_buffer;
 
-	buffer_index op_idx = buffer_alloc_block_op(buf);
+	obj op_idx = buffer_alloc_block_op(buf);
 
-	buffer_index upper = block_copy(buf, c->blk);
-	buffer_index insert;
-	buffer_index lower;
+	obj upper = block_copy(buf, c->blk);
+	obj insert;
+	obj lower;
 
 	i32 max_split = c->blk->n_lines - 1;
 	if (max_split ==  0) {
