@@ -5,3 +5,6 @@ wef
 # [configuration]
 	argument_a  42
 	argument_b  10
+	argum#ent_c  10
+	argument_d  10 2304iu234
+	argument_e  10 # 2304iu234

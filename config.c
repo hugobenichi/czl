@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 
 
+#define DEBUG 0 //1
 
 
 typedef int8_t    i8;
@@ -56,10 +57,7 @@ struct slice {
 	u8* stop;
 };
 
-struct slice_pair {
-	struct slice left;
-	struct slice right;
-};
+static const struct slice slice_empty = { .start = 0, .stop = 0 };
 
 int slice_write(int fd, struct slice s)
 {
@@ -71,6 +69,20 @@ i32 slice_len(struct slice s)
 	return s.stop - s.start;
 }
 
+i32 slice_is_empty(struct slice s)
+{
+	return s.stop == s.start;
+}
+
+char* slice_to_string(struct slice s)
+{
+	int len = slice_len(s);
+	char* str = malloc(len + 1);
+	memcpy(str, s.start, len);
+	str[len] = 0;
+	return str;
+}
+
 struct slice slice_drop(struct slice s, i32 n)
 {
 	n = _min(n, slice_len(s));
@@ -78,30 +90,83 @@ struct slice slice_drop(struct slice s, i32 n)
 	return s;
 }
 
-struct slice_pair slice_split_at(struct slice s, int c)
+struct slice slice_split(struct slice *s, int c)
 {
-	u8* pivot = memchr(s.start, c, slice_len(s));
-	struct slice_pair p = {
-		.left = s,
-		.right = s,
-	};
-	p.left.stop = pivot;
-	p.right.start = pivot;
-	return p;
+	struct slice left = *s;
+	u8* pivot = memchr(left.start, c, slice_len(left));
+	if (!pivot) {
+		pivot = s->stop;
+	}
+
+	left.stop = pivot;
+	s->start = pivot;
+
+	return left;
+}
+
+struct slice slice_strip(struct slice s, u8 c)
+{
+	while (slice_len(s) && *(s.stop-1) == c) {
+		s.stop--;
+	}
+	return s;
 }
 
 struct slice slice_take_line(struct slice *s)
 {
-	u8* pivot = memchr(s->start, '\n', slice_len(*s));
-	if (!pivot) {
-		pivot = s->start;
-	} else {
-		pivot++;
+	struct slice line = slice_split(s, '\n');
+	if (*s->start == '\n') {
+		s->start++;
 	}
-	struct slice line = { .start = s->start, .stop = pivot };
-	printf("left len:%d\n", slice_len(line));
-	s->start = pivot;
 	return line;
+}
+
+typedef int (*char_filter)(u8);
+
+struct slice slice_while(struct slice *s, char_filter fn, int inverse)
+{
+	u8* u = s->start;
+	while (u < s->stop && inverse ^ fn(*u)) {
+		u++;
+	}
+	struct slice left = { .start = s->start, .stop = u };
+	s->start = u;
+	return left;
+
+}
+
+struct slice slice_take_while(struct slice *s, char_filter fn)
+{
+	return slice_while(s, fn, 0);
+}
+
+struct slice slice_drop_until(struct slice *s, char_filter fn)
+{
+	return slice_while(s, fn, 1);
+}
+
+int char_is_space(u8 c) {
+	return c == ' ' || c == '\t';
+}
+
+struct keyval {
+	struct slice key;
+	struct slice val;
+};
+
+struct keyval keyval_from_line(struct slice s)
+{
+	struct keyval kv;
+
+	s = slice_split(&s, '#');
+
+	slice_take_while(&s, char_is_space);
+	kv.key = slice_drop_until(&s, char_is_space);
+
+	slice_take_while(&s, char_is_space);
+	kv.val = slice_drop_until(&s, char_is_space);
+
+	return kv;
 }
 
 struct mapped_file {
@@ -119,7 +184,7 @@ int mapped_file_load(struct mapped_file *f)
 	_fail_if(r < 0, "stat %s failed: %s", f->name, strerror(errno));
 
 	int prot = PROT_READ;
-	int flags = MAP_FILE | MAP_SHARED;
+	int flags = MAP_SHARED;
 	int offset = 0;
 
 	size_t len = f->file_stat.st_size;
@@ -138,15 +203,27 @@ struct configuration {
 
 int main(int argc, char** args)
 {
-	puts("hw");
-
 	struct mapped_file config = {
 		.name = "./config.txt"
 	};
 	mapped_file_load(&config);
+	int n = 0;
 
 	while (slice_len(config.data)) {
 		struct slice line = slice_take_line(&config.data);
-		slice_write(STDOUT_FILENO, line);
+		if (slice_is_empty(line)) {
+			continue;
+		}
+
+		struct keyval kv = keyval_from_line(line);
+		if (slice_is_empty(kv.key)) {
+			continue;
+		}
+
+		if (slice_is_empty(kv.val)) {
+			printf("W: no val for key '%s'\n", slice_to_string(kv.key));
+		} else {
+			printf("key:%s val:%s\n", slice_to_string(kv.key), slice_to_string(kv.val));
+		}
 	}
 }
