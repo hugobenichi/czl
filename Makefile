@@ -18,7 +18,7 @@ build: builddir $(OUTDIR)/czl
 run: build
 	$(OUTDIR)/czl
 
-runrs: build
+runrs: buildrs
 	$(OUTDIR)/term
 
 clean:
