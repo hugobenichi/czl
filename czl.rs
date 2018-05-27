@@ -14,43 +14,23 @@ use std::result;
 
 
 
-// Main variable holding all the editor data.
-static E : Editor = Editor {
-    fb: Framebuffer {
-        text: [0; 4096],
-    },
-    size: Vek {
-        x: 0,
-        y: 0,
-    },
-    bb: Bytebuffer {
-        cursor: 0,
-        data: [0; 512 * 512],
-    },
-};
-
-
 /* CORE TYPE DEFINITION */
 
 // The core editor structure
 struct Editor {
-    size: Vek,              // The dimensions of the editor and backend terminal window
-    fb: Framebuffer,
-    bb: Bytebuffer,
+    window:         Vek,              // The dimensions of the editor and backend terminal window
+    framebuffer:    Framebuffer
+
+    // TODO:
+    //  list of open files and their filebuffers
+    //  list of screens
+    //  current screen layout
+    //  Mode state machine
 }
 
-
-// The struct that manages compositing.
-struct Framebuffer {
-    text: [i32; 4096],
+struct Config {
+    // TODO
 }
-
-// Fixed size append buffer used by Framebuffer to send frame data to the terminal.
-struct Bytebuffer {
-    cursor: i32,
-    data: [u8; 512 * 512],
-}
-
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +45,111 @@ struct Rec {
     min: Vek,   // point the closest to (0,0)
     max: Vek,   // point the farthest to (0,0)
 }
+
+type Colorcode = i32;
+
+enum Color {
+    /* First 8 ansi colors */
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    /* High contract 8 ansi colors */
+    BoldBlack,
+    BoldRed,
+    BoldGreen,
+    BoldYellow,
+    BoldBlue,
+    BoldMagenta,
+    BoldCyan,
+    BoldWhite,
+    /* 6 x 6 x 6 RGB colors = 216 colors */
+    RGB216 { r: i32, g: i32, b: i32 },
+    /* 24 level of Grays */
+    Gray(i32),
+}
+
+enum Move {
+    Left,
+    Right,
+    Up,
+    Down,
+    Start,
+    End,
+}
+
+enum MovementMode {
+    Chars,
+    Lines,
+    Blocks,
+    Words,
+    Digits,
+    Numbers,
+    Paragraphs,
+    Parens,
+    Brackets,
+    Braces,
+    Selection,
+    Pages,
+}
+
+// The struct that manages compositing.
+struct Framebuffer {
+    window:     Vek,
+    len:        i32,
+
+    text:       Vec<u8>,
+    fg:         Vec<u8>,
+    bg:         Vec<u8>,
+    cursor:     Vek,
+
+    buffer:     Bytebuffer,
+}
+
+// Append only buffer with a cursor
+struct Bytebuffer {
+    bytes: Vec<u8>,
+    cursor: i32,
+}
+
+// Transient object for putting text into a subrectangle of a framebuffer.
+// Since it needs a mut ref to the framebuffer, Screen objs cannot be stored.
+struct Screen<'a> {
+    framebuffer:    &'a mut Framebuffer,
+    window:         Rec,
+}
+
+// Manage content of a file
+struct Filebuffer {
+    // TODO
+}
+
+// Point to a place inside a Filebuffer
+struct Cursor<'a> {
+    filebuffer: &'a Filebuffer,
+}
+
+// Store states related to navigation in a given file.
+struct Fileview {
+    relative_lineno: bool,
+    movement_mode: MovementMode,
+    show_token: bool,
+    show_neighbor: bool,
+    show_selection: bool,
+    //selection:  Option<&[Selection]>
+}
+
+
+// + everything needed for input processing ...
+
+
+
+
+/* CORE TYPES IMPLS */
 
 fn vek(x: i32, y: i32) -> Vek {
     return Vek {
@@ -91,7 +176,9 @@ impl Rec {
     fn y1(self) -> i32 { return self.max.y; }
     fn w(self) -> i32 { return self.max.x - self.min.x; }
     fn h(self) -> i32 { return self.max.y - self.min.y; }
-    fn a(self) -> i32 { return self.w() * self.h(); }
+
+    fn area(self) -> i32 { return self.w() * self.h(); }
+    fn size(self) -> Vek { return vek(self.w(), self.h()); }
 }
 
 
@@ -172,7 +259,34 @@ impl std::ops::Sub<Vek> for Rec {
 }
 
 
-/* utils */
+/* Colors */
+
+fn colorcode(c : Color) -> Colorcode {
+    match c {
+        // TODO !
+        Color::Black                    => 0,
+        Color::Red                      => 0,
+        Color::Green                    => 0,
+        Color::Yellow                   => 0,
+        Color::Blue                     => 0,
+        Color::Magenta                  => 0,
+        Color::Cyan                     => 0,
+        Color::White                    => 0,
+        Color::BoldBlack                => 0,
+        Color::BoldRed                  => 0,
+        Color::BoldGreen                => 0,
+        Color::BoldYellow               => 0,
+        Color::BoldBlue                 => 0,
+        Color::BoldMagenta              => 0,
+        Color::BoldCyan                 => 0,
+        Color::BoldWhite                => 0,
+        Color::RGB216 { r, g, b }       => 0,
+        Color::Gray(g)                  => 0,
+    }
+}
+
+
+/* Utils */
 
 fn ordered<T>(v1: T, v2: T) -> (T, T) where T : Ord {
     if v1 < v2 {
