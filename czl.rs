@@ -14,13 +14,28 @@ use std::result;
 
 
 
+/*
+ * Next Steps:
+ *
+ *      - add input event parser, print keys on screen
+ *      - load a file a draw that file
+ *      - add raw term
+ *      - add basic cursor navigation
+ *      - add insert text
+ */
+
+
+
+
+
 /* CORE TYPE DEFINITION */
 
 // The core editor structure
 struct Editor {
     window:         Vek,              // The dimensions of the editor and backend terminal window
-    framebuffer:    Framebuffer
+    framebuffer:    Framebuffer,
 
+    running: bool,
     // TODO:
     //  list of open files and their filebuffers
     //  list of screens
@@ -301,6 +316,40 @@ fn reorder<T>(v1: &mut T, v2: &mut T) where T : Ord {
     }
     std::mem::swap(v1, v2);
 }
+
+
+
+impl Editor {
+
+    fn init() /*-> Editor */ {
+        // TODO
+    }
+
+    fn run(&mut self) {
+        while self.running {
+            self.refresh_screen();
+            self.proces_input();
+        }
+    }
+
+    fn refresh_screen(&mut self) {
+        // TODO
+    }
+
+    fn proces_input(&mut self) {
+        // TODO
+    }
+
+    fn resize(&mut self) {
+        // TODO
+    }
+}
+
+
+
+
+
+
 
 type Rez<T> = result::Result<T, String>;
 
