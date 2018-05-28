@@ -318,11 +318,48 @@ fn reorder<T>(v1: &mut T, v2: &mut T) where T : Ord {
 }
 
 
+fn term_get_size() -> Vek {
+    // TODO
+    return vek(10,10);
+}
+
+impl Bytebuffer {
+    fn new() -> Bytebuffer {
+        return Bytebuffer {
+            bytes: vec![0; 64 * 1024],
+            cursor: 0,
+        };
+    }
+}
+
+impl Framebuffer {
+    fn new(window: Vek) -> Framebuffer {
+        let len = window.x * window.y;
+        let vlen = len as usize;
+        return Framebuffer {
+            window,
+            len,
+            text:       vec![0; vlen],
+            fg:         vec![0; vlen],
+            bg:         vec![0; vlen],
+            cursor:     vek(0,0),
+            buffer:     Bytebuffer::new(),
+        };
+    }
+}
 
 impl Editor {
 
-    fn init() /*-> Editor */ {
+    fn init() -> Editor {
         // TODO
+        let window = term_get_size();
+        let framebuffer = Framebuffer::new(window);
+        let running = true;
+        return Editor {
+            window,
+            framebuffer,
+            running,
+        };
     }
 
     fn run(&mut self) {
@@ -337,7 +374,13 @@ impl Editor {
     }
 
     fn proces_input(&mut self) {
-        // TODO
+        let mut stdin = io::stdin();
+        let mut buffer = [0;1];
+        stdin.read_exact(&mut buffer).unwrap();
+
+        println!("input: {:?}", buffer);
+
+        self.running = false;
     }
 
     fn resize(&mut self) {
@@ -382,9 +425,12 @@ fn file_lines_print(buf: &[u8])
 
 fn main()
 {
-    let filename = "./term.rs";
+    let filename = file!();
 
     let buf = file_load(filename).unwrap();
 
     file_lines_print(&buf);
+
+    let mut e = Editor::init();
+    e.run();
 }
