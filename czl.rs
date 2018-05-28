@@ -5,7 +5,6 @@
 
 
 
-
 use std::fs;
 use std::io;
 use std::io::prelude::*;
@@ -433,4 +432,33 @@ fn main()
 
     let mut e = Editor::init();
     e.run();
+
+    println!("term size {:?}", term_size());
+}
+
+
+
+
+
+/* TERMINAL BINDINGS */
+
+#[repr(C)]
+struct Winsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+// BUG: this appears to not be correctly linked statically ...
+#[link(name = "term", kind = "static")]
+extern "C" {
+    fn get_terminal_size() -> Winsize;
+}
+
+fn term_size() -> Vek {
+    unsafe {
+        let ws = get_terminal_size();
+        return vek(ws.ws_col as i32, ws.ws_row as i32);
+    }
 }
