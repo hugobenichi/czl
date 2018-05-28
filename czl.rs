@@ -424,6 +424,8 @@ fn file_lines_print(buf: &[u8])
 
 fn main()
 {
+    term_set_raw(); // BUG: screen restore does not work
+
     let filename = file!();
 
     let buf = file_load(filename).unwrap();
@@ -453,12 +455,26 @@ struct Winsize {
 // BUG: this appears to not be correctly linked statically ...
 #[link(name = "term", kind = "static")]
 extern "C" {
-    fn get_terminal_size() -> Winsize;
+    fn terminal_get_size() -> Winsize;
+    fn terminal_restore();
+    fn terminal_set_raw() -> i32;
 }
 
 fn term_size() -> Vek {
     unsafe {
-        let ws = get_terminal_size();
+        let ws = terminal_get_size();
         return vek(ws.ws_col as i32, ws.ws_row as i32);
+    }
+}
+
+fn term_restore() {
+    unsafe {
+        terminal_restore();
+    }
+}
+
+fn term_set_raw() {
+    unsafe {
+        let _ = terminal_set_raw();
     }
 }
