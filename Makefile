@@ -10,7 +10,8 @@ builddir:
 
 $(OUTDIR)/libterm.a: builddir term.c
 	gcc -c term.c -o $(OUTDIR)/term.o
-	gcc -shared -Wl -o $(OUTDIR)/libterm.a $(OUTDIR)/term.o -lc
+	ar rcs $(OUTDIR)/libterm.a $(OUTDIR)/term.o
+	#gcc -shared -Wl -o $(OUTDIR)/libterm.a $(OUTDIR)/term.o -lc
 
 native: builddir $(OUTDIR)/libterm.a
 

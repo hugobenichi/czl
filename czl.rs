@@ -373,13 +373,11 @@ impl Editor {
     }
 
     fn proces_input(&mut self) {
-        let mut stdin = io::stdin();
-        let mut buffer = [0;1];
-        stdin.read_exact(&mut buffer).unwrap();
+        let c = read_char();
+        println!("input: {:?}", c);
 
-        println!("input: {:?}", buffer);
-
-        self.running = false;
+        self.running = (c != CTRL_C);
+        //self.running = false;
     }
 
     fn resize(&mut self) {
@@ -476,5 +474,99 @@ fn term_restore() {
 fn term_set_raw() {
     unsafe {
         let _ = terminal_set_raw();
+    }
+}
+
+
+
+
+
+
+/* KEY INPUT HANDLING */
+
+// TODO: pretty print control codes
+#[derive(Debug, Clone, Copy)]
+enum Input {
+    Noinput,
+    Key(char),
+    Click(Vek),
+    ClickRelease(Vek),
+    UnknownEscSeq,
+    EscZ,       // shift + tab -> "\x1b[Z"
+    Resize,
+    Error,
+}
+
+const NO_KEY    : char = 0 as char;
+const CTRL_C    : char = 3 as char;
+const CTRL_D    : char = 4 as char;
+const CTRL_F    : char = 6 as char;
+const CTRL_H    : char = 8 as char;
+const TAB       : char = 9 as char;       // also ctrl + i
+const RETURN    : char = 10 as char;      // also ctrl + j
+const CTRL_K    : char = 11 as char;
+const CTRL_L    : char = 12 as char;
+const ENTER     : char = 13 as char;
+const CTRL_Q    : char = 17 as char;
+const CTRL_S    : char = 19 as char;
+const CTRL_U    : char = 21 as char;
+const CTRL_Z    : char = 26 as char;
+const ESC       : char = 27 as char;      // also ctrl + [
+const BACKSPACE : char = 127 as char;
+
+
+fn is_printable(c : char) -> bool {
+    return ESC < c && c < BACKSPACE;
+}
+
+fn read_char() -> char {
+    let mut stdin = io::stdin();
+    let mut buf = [0;1];
+    // TODO: handle timeouts when nread == 0 by looping
+    // TODO: handle interrupts when errno == EINTR
+    // TODO: propagate error otherwise
+    // TODO: support unicode !
+    stdin.read_exact(&mut buf).unwrap();
+    return buf[0] as char;
+}
+
+fn read_input() -> Input {
+    let c = read_char();
+
+    if c != ESC {
+        return Input::Key(c);
+    }
+
+    // Escape sequence
+    let c1 = read_char();
+    if c1 != '[' {
+        panic!("was expecting '[', but got {}", c);
+    }
+
+    match read_char() {
+        'M' =>  (), // Mouse click, handled below
+        'Z' =>  return Input::EscZ,
+        _   =>  return Input::UnknownEscSeq
+    }
+
+    // Mouse click
+    // TODO: support other mouse modes
+    let c2 = read_char();
+    let mut x = (read_char() as i32) - 33;
+    let mut y = (read_char() as i32) - 33;
+    if x < 0 {
+        x += 255;
+    }
+    if y < 0 {
+        y += 255;
+    }
+
+    let v = vek(x,y);
+
+    // BUG: does not work currently. Maybe terminal setup is wrong ?
+    match c2 as i32 {
+    0 ... 2 =>  return Input::Click(v),
+    3       =>  return Input::ClickRelease(v),
+    _       =>  return Input::UnknownEscSeq,
     }
 }
