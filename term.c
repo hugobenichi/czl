@@ -7,24 +7,29 @@
 
 #include <sys/ioctl.h>
 
-struct winsize terminal_get_size() {
+
+static const char terminal_cursor_save[]                  = "\x1b[s";
+static const char terminal_cursor_restore[]               = "\x1b[u";
+static const char terminal_switch_offscreen[]             = "\x1b[?47h";
+static const char terminal_switch_mainscreen[]            = "\x1b[?47l";
+static const char terminal_switch_mouse_event_on[]        = "\x1b[?1000h";
+static const char terminal_switch_mouse_tracking_on[]     = "\x1b[?1002h";
+static const char terminal_switch_mouse_tracking_off[]    = "\x1b[?1002l";
+static const char terminal_switch_mouse_event_off[]       = "\x1b[?1000l";
+static const char terminal_switch_focus_event_on[]        = "\x1b[?1004h";
+static const char terminal_switch_focus_event_off[]       = "\x1b[?1004l";
+
+
+struct winsize terminal_get_size()
+{
 	struct winsize w = {};
 	ioctl(1, TIOCGWINSZ, &w);
 	return w;
 }
 
-static const char terminal_cursor_save[]                      = "\x1b[s";
-static const char terminal_cursor_restore[]                   = "\x1b[u";
-static const char terminal_switch_offscreen[]                 = "\x1b[?47h";
-static const char terminal_switch_mainscreen[]                = "\x1b[?47l";
-static const char terminal_switch_mouse_event_on[]            = "\x1b[?1000h";
-static const char terminal_switch_mouse_tracking_on[]         = "\x1b[?1002h";
-static const char terminal_switch_mouse_tracking_off[]        = "\x1b[?1002l";
-static const char terminal_switch_mouse_event_off[]           = "\x1b[?1000l";
-static const char terminal_switch_focus_event_on[]            = "\x1b[?1004h";
-static const char terminal_switch_focus_event_off[]           = "\x1b[?1004l";
 
 struct termios termios_initial = {};
+
 
 void terminal_restore()
 {
@@ -35,6 +40,7 @@ void terminal_restore()
 	fprintf(stdout, terminal_switch_mainscreen);
 	fprintf(stdout, terminal_cursor_restore);
 }
+
 
 int terminal_set_raw()
 {

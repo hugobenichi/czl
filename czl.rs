@@ -24,6 +24,9 @@ use std::result;
  */
 
 
+const CONF : Config = Config {
+    draw_screen:        true,
+};
 
 
 
@@ -44,6 +47,7 @@ struct Editor {
 
 struct Config {
     // TODO
+    draw_screen: bool,
 }
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
@@ -126,8 +130,8 @@ struct Framebuffer {
 
 // Append only buffer with a cursor
 struct Bytebuffer {
-    bytes: Vec<u8>,
-    cursor: i32,
+    bytes:  Vec<u8>,
+    cursor: usize,
 }
 
 // Transient object for putting text into a subrectangle of a framebuffer.
@@ -325,11 +329,36 @@ fn term_get_size() -> Vek {
 impl Bytebuffer {
     fn new() -> Bytebuffer {
         return Bytebuffer {
-            bytes: vec![0; 64 * 1024],
+            bytes:  vec![0; 64 * 1024],
             cursor: 0,
         };
     }
+
+    fn clear(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn put(&mut self, src: &[u8]) {
+        let dst = &mut self.bytes;
+        let c1 = self.cursor;
+        let c2 = c1 + src.len();
+        if c2 > dst.capacity() {
+            dst.reserve(src.len());
+        }
+        dst[c1..c2].clone_from_slice(src);
+        self.cursor = c2;
+    }
+
+    // TODO: propagate error
+    fn write_into<T>(&self, t: &mut T) where T : io::Write {
+        let c = self.cursor;
+        let d = &self.bytes[0..c];
+        let n = t.write(d).unwrap();
+        t.flush().unwrap();
+        assert_eq!(n, c);
+    }
 }
+
 
 impl Framebuffer {
     fn new(window: Vek) -> Framebuffer {
@@ -344,6 +373,28 @@ impl Framebuffer {
             cursor:     vek(0,0),
             buffer:     Bytebuffer::new(),
         };
+    }
+
+    // TODO: propagate error
+    fn push_frame(&mut self) {
+        if !CONF.draw_screen {
+            return;
+        }
+
+        let b = &mut self.buffer;
+
+        b.clear();
+        b.put(term_cursor_hide);
+        b.put(term_gohome);
+        // TODO: renter framebuffer content
+        let cursor = vek(10,10);
+        let cursor_command = format!("\x1b[{};{}H", cursor.x, cursor.y);
+        b.put(cursor_command.as_bytes());
+
+        b.put(term_cursor_show);
+
+        let stdout = io::stdout();
+        b.write_into(&mut stdout.lock());
     }
 }
 
@@ -369,15 +420,14 @@ impl Editor {
     }
 
     fn refresh_screen(&mut self) {
-        // TODO
+        self.framebuffer.push_frame();
     }
 
     fn proces_input(&mut self) {
         let c = read_char();
         println!("input: {:?}", c);
 
-        self.running = (c != CTRL_C);
-        //self.running = false;
+        self.running = c != CTRL_C;
     }
 
     fn resize(&mut self) {
@@ -443,7 +493,7 @@ fn main()
 /* TERMINAL BINDINGS */
 
 #[repr(C)]
-struct Winsize {
+struct TermWinsize {
     ws_row: u16,
     ws_col: u16,
     ws_xpixel: u16,
@@ -453,7 +503,7 @@ struct Winsize {
 // BUG: this appears to not be correctly linked statically ...
 #[link(name = "term", kind = "static")]
 extern "C" {
-    fn terminal_get_size() -> Winsize;
+    fn terminal_get_size() -> TermWinsize;
     fn terminal_restore();
     fn terminal_set_raw() -> i32;
 }
@@ -477,8 +527,23 @@ fn term_set_raw() {
     }
 }
 
-
-
+const term_start                      : &[u8] = b"\x1b[";
+const term_finish                     : &[u8] = b"\x1b[0m";
+const term_clear                      : &[u8] = b"\x1bc";
+const term_cursor_hide                : &[u8] = b"\x1b[?25l";
+const term_cursor_show                : &[u8] = b"\x1b[?25h";
+const term_cursor_save                : &[u8] = b"\x1b[s";
+const term_cursor_restore             : &[u8] = b"\x1b[u";
+const term_switch_offscreen           : &[u8] = b"\x1b[?47h";
+const term_switch_mainscreen          : &[u8] = b"\x1b[?47l";
+const term_switch_mouse_event_on      : &[u8] = b"\x1b[?1000h";
+const term_switch_mouse_tracking_on   : &[u8] = b"\x1b[?1002h";
+const term_switch_mouse_tracking_off  : &[u8] = b"\x1b[?1002l";
+const term_switch_mouse_event_off     : &[u8] = b"\x1b[?1000l";
+const term_switch_focus_event_on      : &[u8] = b"\x1b[?1004h";
+const term_switch_focus_event_off     : &[u8] = b"\x1b[?1004l";
+const term_gohome                     : &[u8] = b"\x1b[H";
+const term_newline                    : &[u8] = b"\r\n";
 
 
 
@@ -538,10 +603,7 @@ fn read_input() -> Input {
     }
 
     // Escape sequence
-    let c1 = read_char();
-    if c1 != '[' {
-        panic!("was expecting '[', but got {}", c);
-    }
+    assert_eq!(read_char(), '[');
 
     match read_char() {
         'M' =>  (), // Mouse click, handled below
@@ -565,8 +627,8 @@ fn read_input() -> Input {
 
     // BUG: does not work currently. Maybe terminal setup is wrong ?
     match c2 as i32 {
-    0 ... 2 =>  return Input::Click(v),
-    3       =>  return Input::ClickRelease(v),
-    _       =>  return Input::UnknownEscSeq,
+        0 ... 2 =>  return Input::Click(v),
+        3       =>  return Input::ClickRelease(v),
+        _       =>  return Input::UnknownEscSeq,
     }
 }

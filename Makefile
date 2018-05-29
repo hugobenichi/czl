@@ -5,12 +5,11 @@ OUTDIR=build
 builddir:
 	mkdir -p $(OUTDIR)
 
-#$(OUTDIR)/czl: *.c
-#	gcc -Wall -std=c99 -g -Os -o $@ $<
-
+# ar -r cs archive files on osx but ar -rcs archive files on linux ???
 $(OUTDIR)/libterm.a: builddir term.c
 	gcc -c term.c -o $(OUTDIR)/term.o
-	ar rcs $(OUTDIR)/libterm.a $(OUTDIR)/term.o
+	ar -r cs $(OUTDIR)/libterm.a $(OUTDIR)/term.o
+	#ar -rcs $(OUTDIR)/libterm.a $(OUTDIR)/term.o
 	#gcc -shared -Wl -o $(OUTDIR)/libterm.a $(OUTDIR)/term.o -lc
 
 native: builddir $(OUTDIR)/libterm.a
