@@ -502,7 +502,7 @@ fn file_lines_print(buf: &[u8])
 
 fn main()
 {
-    term_set_raw(); // BUG: screen restore does not work
+    term_set_raw();
 
     /*
     let filename = file!();
@@ -511,6 +511,8 @@ fn main()
     */
 
     Editor::init().run();
+
+    term_restore();
 }
 
 
@@ -542,15 +544,31 @@ fn term_size() -> Vek {
     }
 }
 
-fn term_restore() {
+fn term_set_raw() {
+    let stdout = io::stdout();
+    let mut h = stdout.lock();
+    h.write(term_cursor_save).unwrap();
+    h.write(term_switch_offscreen).unwrap();
+    h.write(term_switch_mouse_event_on).unwrap();
+    h.write(term_switch_mouse_tracking_on).unwrap();
+    h.flush().unwrap();
+
     unsafe {
-        terminal_restore();
+        let _ = terminal_set_raw();
     }
 }
 
-fn term_set_raw() {
+fn term_restore() {
+    let stdout = io::stdout();
+    let mut h = stdout.lock();
+    h.write(term_switch_mouse_tracking_off).unwrap();
+    h.write(term_switch_mouse_event_off).unwrap();
+    h.write(term_switch_mainscreen).unwrap();
+    h.write(term_cursor_restore).unwrap();
+    h.flush().unwrap();
+
     unsafe {
-        let _ = terminal_set_raw();
+        terminal_restore();
     }
 }
 
