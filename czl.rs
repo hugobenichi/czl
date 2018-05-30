@@ -10,20 +10,22 @@ use std::io;
 use std::io::prelude::*;
 use std::str;
 use std::result;
+use std::cmp::min;
+use std::cmp::max;
 
 
 
 /*
  * Next Steps:
  *
- *      - add input event parser, print keys on screen
+ *      - handle resize
+ *      - handle colors ?
  *      - load a file a draw that file
- *      - add raw term
- *      - add basic cursor navigation
  *      - add insert text
  */
 
 
+// Global constant that controls a bunch of options.
 const CONF : Config = Config {
     draw_screen:        true,
 };
@@ -238,7 +240,7 @@ impl std::ops::Neg for Vek {
 /* Vek/Rec ops */
 
 impl Rec {
-    fn is_inside(self, v : Vek) -> bool {
+    fn contains(self, v : Vek) -> bool {
         return self.min.x <= v.x
             && self.min.y <= v.y
             &&               v.x <= self.max.x
@@ -379,48 +381,56 @@ impl Framebuffer {
     }
 
     fn put(&mut self, pos: Vek, src: &[u8]) {
-        // TODO
-        /*
-        let dst = &mut self.bytes;
-        let l = src.len();
-        let c1 = self.cursor;
-        let c2 = c1 + l;
-        if c2 > dst.capacity() {
-            dst.reserve(l);
-        }
-        dst[c1..c2].clone_from_slice(src);
-        self.cursor = c2;
-        */
+        assert!(self.window.rec().contains(pos));
+
+        let maxlen = (self.window.x - pos.x) as usize;
+        let len = min(src.len(), maxlen);
+
+        let start = (pos.y * self.window.x + pos.x) as usize;
+        let stop = start + len;
+
+        self.text[start..stop].clone_from_slice(&src[..len]);
+    }
+
+    fn set_cursor(&mut self, new_cursor: Vek) {
+        let mut x = new_cursor.x;
+        let mut y = new_cursor.y;
+        x = max(x, 0);
+        x = min(x, self.window.x - 1);
+        y = max(y, 0);
+        y = min(y, self.window.y - 1);
+        self.cursor = vek(x,y);
     }
 
     // TODO: propagate error
+    // TODO: add color
+    // PERF: skip unchanged sections
     fn push_frame(&mut self) {
         if !CONF.draw_screen {
             return;
         }
 
         let b = &mut self.buffer;
-
         b.rewind();
         b.put(term_cursor_hide);
         b.put(term_gohome);
 
         let w = self.window.x as usize;
-        let mut left = 0;
-        let mut right = w;
+        let mut l = 0;
+        let mut r = w;
         for i in 0..self.window.y {
-            // TODO: add color
-            // PERF: skip unchanged sections
-            b.put(&self.text[left..right]);
-            left += w;
-            right += w;
-            b.put(term_newline);
+            if i > 0 {
+                // Do not put "\r\n" on the last line
+                b.put(term_newline);
+            }
+            b.put(&self.text[l..r]);
+            l += w;
+            r += w;
         }
 
-        let cursor = vek(10,10);
-        let cursor_command = format!("\x1b[{};{}H", cursor.x, cursor.y);
+        // Terminal cursor coodinates start at (1,1)
+        let cursor_command = format!("\x1b[{};{}H", self.cursor.y + 1, self.cursor.x + 1);
         b.put(cursor_command.as_bytes());
-
         b.put(term_cursor_show);
 
         let stdout = io::stdout();
@@ -455,9 +465,32 @@ impl Editor {
 
     fn proces_input(&mut self) {
         let c = read_char();
-        println!("input: {:?}", c);
+
+        let l = format!("input: {:?}", c);
+        self.framebuffer.put(vek(20,20), l.as_bytes());
+
+        // TODO: more sophisticated cursor movement ...
+        match c {
+            'h' => self.mv_cursor(Move::Left),
+            'j' => self.mv_cursor(Move::Down),
+            'k' => self.mv_cursor(Move::Up),
+            'l' => self.mv_cursor(Move::Right),
+            _   => (),
+        }
 
         self.running = c != CTRL_C;
+    }
+
+    fn mv_cursor(&mut self, m : Move) {
+        let mut p = self.framebuffer.cursor;
+        match m {
+            Move::Left  => p = p + vek(-1,0),
+            Move::Right => p = p + vek(1,0),
+            Move::Up    => p = p + vek(0,-1),
+            Move::Down  => p = p + vek(0,1),
+            _           => (),
+        }
+        self.framebuffer.set_cursor(p);
     }
 
     fn resize(&mut self) {
