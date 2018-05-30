@@ -321,11 +321,6 @@ fn reorder<T>(v1: &mut T, v2: &mut T) where T : Ord {
 }
 
 
-fn term_get_size() -> Vek {
-    // TODO
-    return vek(10,10);
-}
-
 impl Bytebuffer {
     fn new() -> Bytebuffer {
         return Bytebuffer {
@@ -334,16 +329,17 @@ impl Bytebuffer {
         };
     }
 
-    fn clear(&mut self) {
+    fn rewind(&mut self) {
         self.cursor = 0;
     }
 
     fn put(&mut self, src: &[u8]) {
         let dst = &mut self.bytes;
+        let l = src.len();
         let c1 = self.cursor;
-        let c2 = c1 + src.len();
+        let c2 = c1 + l;
         if c2 > dst.capacity() {
-            dst.reserve(src.len());
+            dst.reserve(l);
         }
         dst[c1..c2].clone_from_slice(src);
         self.cursor = c2;
@@ -359,6 +355,7 @@ impl Bytebuffer {
     }
 }
 
+const frame_default_text : u8 = ' ' as u8;
 
 impl Framebuffer {
     fn new(window: Vek) -> Framebuffer {
@@ -375,6 +372,27 @@ impl Framebuffer {
         };
     }
 
+    fn clear(&mut self) {
+        for i in self.text.iter_mut() {
+            *i = frame_default_text;
+        }
+    }
+
+    fn put(&mut self, pos: Vek, src: &[u8]) {
+        // TODO
+        /*
+        let dst = &mut self.bytes;
+        let l = src.len();
+        let c1 = self.cursor;
+        let c2 = c1 + l;
+        if c2 > dst.capacity() {
+            dst.reserve(l);
+        }
+        dst[c1..c2].clone_from_slice(src);
+        self.cursor = c2;
+        */
+    }
+
     // TODO: propagate error
     fn push_frame(&mut self) {
         if !CONF.draw_screen {
@@ -383,10 +401,22 @@ impl Framebuffer {
 
         let b = &mut self.buffer;
 
-        b.clear();
+        b.rewind();
         b.put(term_cursor_hide);
         b.put(term_gohome);
-        // TODO: renter framebuffer content
+
+        let w = self.window.x as usize;
+        let mut left = 0;
+        let mut right = w;
+        for i in 0..self.window.y {
+            // TODO: add color
+            // PERF: skip unchanged sections
+            b.put(&self.text[left..right]);
+            left += w;
+            right += w;
+            b.put(term_newline);
+        }
+
         let cursor = vek(10,10);
         let cursor_command = format!("\x1b[{};{}H", cursor.x, cursor.y);
         b.put(cursor_command.as_bytes());
@@ -402,7 +432,7 @@ impl Editor {
 
     fn init() -> Editor {
         // TODO
-        let window = term_get_size();
+        let window = term_size();
         let framebuffer = Framebuffer::new(window);
         let running = true;
         return Editor {
@@ -474,16 +504,13 @@ fn main()
 {
     term_set_raw(); // BUG: screen restore does not work
 
+    /*
     let filename = file!();
-
     let buf = file_load(filename).unwrap();
-
     file_lines_print(&buf);
+    */
 
-    let mut e = Editor::init();
-    e.run();
-
-    println!("term size {:?}", term_size());
+    Editor::init().run();
 }
 
 
