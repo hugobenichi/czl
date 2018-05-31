@@ -190,33 +190,30 @@ struct Fileview {
 /* CORE TYPES IMPLS */
 
 fn vek(x: i32, y: i32) -> Vek {
-    return Vek {
-       x,
-       y,
-    };
+    Vek { x, y }
 }
 
 // TODO: rec ctor with width and height ??
 fn rec(x0: i32, y0: i32, x1: i32, y1: i32) -> Rec {
     let (a0, a1) = ordered(x0, x1);
     let (b0, b1) = ordered(x0, x1);
-    return Rec {
+    Rec {
         min: vek(a0, b0),
         max: vek(a1, b1),
-    };
+    }
 }
 
 
 impl Rec {
-    fn x0(self) -> i32 { return self.min.x; }
-    fn y0(self) -> i32 { return self.min.y; }
-    fn x1(self) -> i32 { return self.max.x; }
-    fn y1(self) -> i32 { return self.max.y; }
-    fn w(self) -> i32 { return self.max.x - self.min.x; }
-    fn h(self) -> i32 { return self.max.y - self.min.y; }
+    fn x0(self) -> i32 { self.min.x }
+    fn y0(self) -> i32 { self.min.y }
+    fn x1(self) -> i32 { self.max.x }
+    fn y1(self) -> i32 { self.max.y }
+    fn w(self) -> i32 { self.max.x - self.min.x }
+    fn h(self) -> i32 { self.max.y - self.min.y }
 
-    fn area(self) -> i32 { return self.w() * self.h(); }
-    fn size(self) -> Vek { return vek(self.w(), self.h()); }
+    fn area(self) -> i32 { self.w() * self.h() }
+    fn size(self) -> Vek { vek(self.w(), self.h()) }
 }
 
 
@@ -224,10 +221,10 @@ impl Rec {
 
 impl Vek {
     fn rec(self) -> Rec {
-        return Rec {
+        Rec {
             min: vek(0,0),
             max: self,
-        };
+        }
     }
 }
 
@@ -235,7 +232,7 @@ impl std::ops::Add<Vek> for Vek {
     type Output = Vek;
 
     fn add(self, v: Vek) -> Vek {
-        return vek(self.x + v.x, self.y + v.y);
+        vek(self.x + v.x, self.y + v.y)
     }
 }
 
@@ -243,7 +240,7 @@ impl std::ops::Sub<Vek> for Vek {
     type Output = Vek;
 
     fn sub(self, v: Vek) -> Vek {
-        return vek(self.x - v.x, self.y - v.y);
+        vek(self.x - v.x, self.y - v.y)
     }
 }
 
@@ -251,18 +248,19 @@ impl std::ops::Neg for Vek {
     type Output = Vek;
 
     fn neg(self) -> Vek {
-        return vek(-self.x, -self.y);
+        vek(-self.x, -self.y)
     }
 }
 
 /* Vek/Rec ops */
 
 impl Rec {
+    // TODO: consider excluding max
     fn contains(self, v : Vek) -> bool {
-        return self.min.x <= v.x
-            && self.min.y <= v.y
-            &&               v.x <= self.max.x
-            &&               v.y <= self.max.y
+        self.min.x <= v.x &&
+        self.min.y <= v.y &&
+                      v.x <= self.max.x &&
+                      v.y <= self.max.y
     }
 }
 
@@ -270,10 +268,10 @@ impl std::ops::Add<Vek> for Rec {
     type Output = Rec;
 
     fn add(self, v: Vek) -> Rec {
-        return Rec {
+        Rec {
             min: self.min + v,
             max: self.max + v,
-        };
+        }
     }
 }
 
@@ -281,7 +279,7 @@ impl std::ops::Add<Rec> for Vek {
     type Output = Rec;
 
     fn add(self, r: Rec) -> Rec {
-        return r + self;
+        r + self
     }
 }
 
@@ -289,10 +287,10 @@ impl std::ops::Sub<Vek> for Rec {
     type Output = Rec;
 
     fn sub(self, v: Vek) -> Rec {
-        return Rec {
+        Rec {
             min: self.min - v,
             max: self.max - v,
-        };
+        }
     }
 }
 
@@ -328,33 +326,40 @@ fn colorcode(c : Color) -> Colorcode {
 
 fn ordered<T>(v1: T, v2: T) -> (T, T) where T : Ord {
     if v1 < v2 {
-        return (v1, v2);
+        return (v1, v2)
     }
-    return (v2, v1);
+    (v2, v1)
 }
 
 fn reorder<T>(v1: &mut T, v2: &mut T) where T : Ord {
-    if v1 < v2 {
-        return;
+    if v1 > v2 {
+        std::mem::swap(v1, v2)
     }
-    std::mem::swap(v1, v2);
 }
 
 // CLEANUP: replace with memset if this is ever a thing in Rust
-fn set<T>(s: &mut [T], t: T) where T : Copy {
+fn fill<T>(s: &mut [T], t: T) where T : Copy {
     for i in s.iter_mut() {
-        *i = t;
+        *i = t
     }
+}
+
+fn copy<T>(dst: &mut [T], src: &[T]) where T : Copy {
+    dst.clone_from_slice(src)
+}
+
+fn copyn<T>(dst: &mut [T], src: &[T], n: usize) where T : Copy {
+    dst[..n].clone_from_slice(&src[..n])
 }
 
 // CLEANUP: replace with std memchr when this make it into stable
 fn memchr(c: u8, s: &[u8]) -> Option<usize> {
     for (i, &x) in s.iter().enumerate() {
         if x == c {
-            return Some(i);
+            return Some(i)
         }
     }
-    return None;
+    None
 }
 
 /* CORE TYPE IMPLEMENTATION */
@@ -362,14 +367,14 @@ fn memchr(c: u8, s: &[u8]) -> Option<usize> {
 
 impl Bytebuffer {
     fn new() -> Bytebuffer {
-        return Bytebuffer {
+        Bytebuffer {
             bytes:  vec![0; 64 * 1024],
             cursor: 0,
-        };
+        }
     }
 
     fn rewind(&mut self) {
-        self.cursor = 0;
+        self.cursor = 0
     }
 
     fn put(&mut self, src: &[u8]) {
@@ -380,7 +385,7 @@ impl Bytebuffer {
         if c2 > dst.capacity() {
             dst.reserve(l);
         }
-        dst[c1..c2].clone_from_slice(src);
+        copy( &mut dst[c1..c2], src);
         self.cursor = c2;
     }
 
@@ -402,7 +407,8 @@ impl Framebuffer {
     fn new(window: Vek) -> Framebuffer {
         let len = window.x * window.y;
         let vlen = len as usize;
-        return Framebuffer {
+
+        Framebuffer {
             window,
             len,
             text:       vec![frame_default_text; vlen],
@@ -410,14 +416,14 @@ impl Framebuffer {
             bg:         vec![frame_default_bg; vlen],
             cursor:     vek(0,0),
             buffer:     Bytebuffer::new(),
-        };
+        }
     }
 
     // TODO: add clear in sub rec
     fn clear(&mut self) {
-        set(&mut self.text, frame_default_text);
-        set(&mut self.fg,   frame_default_fg);
-        set(&mut self.bg,   frame_default_bg);
+        fill(&mut self.text, frame_default_text);
+        fill(&mut self.fg,   frame_default_fg);
+        fill(&mut self.bg,   frame_default_bg);
     }
 
     fn put(&mut self, pos: Vek, src: &[u8]) {
@@ -429,7 +435,7 @@ impl Framebuffer {
         let start = (pos.y * self.window.x + pos.x) as usize;
         let stop = start + len;
 
-        self.text[start..stop].clone_from_slice(&src[..len]);
+        copy(&mut self.text[start..stop], &src[..len]);
     }
 
     fn set_cursor(&mut self, new_cursor: Vek) {
@@ -447,7 +453,7 @@ impl Framebuffer {
     // PERF: skip unchanged sections
     fn push_frame(&mut self) {
         if !CONF.draw_screen {
-            return;
+            return
         }
 
         let b = &mut self.buffer;
@@ -502,7 +508,7 @@ impl Filebuffer {
             file.push(i);
         }
 
-        return Filebuffer { text, lines, file };
+        Filebuffer { text, lines, file }
     }
 }
 
@@ -510,15 +516,15 @@ impl Filebuffer {
 impl Editor {
 
     fn init() -> Editor {
-        // TODO
         let window = term_size();
         let framebuffer = Framebuffer::new(window);
         let running = true;
-        return Editor {
+
+        Editor {
             window,
             framebuffer,
             running,
-        };
+        }
     }
 
     fn run(&mut self) {
@@ -595,14 +601,14 @@ fn file_load(filename: &str) -> io::Result<Vec<u8>>
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "not read enough bytes")); // TODO: add number of bytes
     }
 
-    return Ok(buf);
+    Ok(buf)
 }
 
 fn file_lines_print(buf: &[u8])
 {
     let newline = '\n' as u8;
     for (i, line) in buf.split(|c| *c == newline).enumerate() {
-        println!("{}: {}", i, str::from_utf8(line).unwrap());
+        println!("{}: {}", i, str::from_utf8(line).unwrap())
     }
 }
 
@@ -646,7 +652,7 @@ extern "C" {
 fn term_size() -> Vek {
     unsafe {
         let ws = terminal_get_size();
-        return vek(ws.ws_col as i32, ws.ws_row as i32);
+        vek(ws.ws_col as i32, ws.ws_row as i32)
     }
 }
 
@@ -732,7 +738,7 @@ const BACKSPACE : char = 127 as char;
 
 
 fn is_printable(c : char) -> bool {
-    return ESC < c && c < BACKSPACE;
+    ESC < c && c < BACKSPACE
 }
 
 fn read_char() -> char {
@@ -743,7 +749,8 @@ fn read_char() -> char {
     // TODO: propagate error otherwise
     // TODO: support unicode !
     stdin.read_exact(&mut buf).unwrap();
-    return buf[0] as char;
+
+    buf[0] as char
 }
 
 fn read_input() -> Input {
