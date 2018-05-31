@@ -28,6 +28,7 @@ use std::cmp::max;
 // Global constant that controls a bunch of options.
 const CONF : Config = Config {
     draw_screen:        true,
+    retain_frame:       false,
 };
 
 
@@ -50,6 +51,7 @@ struct Editor {
 struct Config {
     // TODO
     draw_screen: bool,
+    retain_frame:bool,
 }
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
@@ -68,6 +70,7 @@ struct Rec {
 
 type Colorcode = i32;
 
+#[derive(Debug, Clone, Copy)]
 enum Color {
     /* First 8 ansi colors */
     Black,
@@ -78,7 +81,7 @@ enum Color {
     Magenta,
     Cyan,
     White,
-    /* High contract 8 ansi colors */
+    /* High contrast 8 ansi colors */
     BoldBlack,
     BoldRed,
     BoldGreen,
@@ -123,8 +126,10 @@ struct Framebuffer {
     len:        i32,
 
     text:       Vec<u8>,
-    fg:         Vec<u8>,
-    bg:         Vec<u8>,
+                // TODO: store u8 instead and use two tables
+                // for color -> u8 -> control string conversions
+    fg:         Vec<Color>,
+    bg:         Vec<Color>,
     cursor:     Vek,
 
     buffer:     Bytebuffer,
@@ -306,7 +311,7 @@ fn colorcode(c : Color) -> Colorcode {
 }
 
 
-/* Utils */
+/* UTILITIES */
 
 fn ordered<T>(v1: T, v2: T) -> (T, T) where T : Ord {
     if v1 < v2 {
@@ -321,6 +326,14 @@ fn reorder<T>(v1: &mut T, v2: &mut T) where T : Ord {
     }
     std::mem::swap(v1, v2);
 }
+
+fn set<T>(s: &mut [T], t: T) where T : Copy {
+    for i in s.iter_mut() {
+        *i = t;
+    }
+}
+
+/* CORE TYPE IMPLEMENTATION */
 
 
 impl Bytebuffer {
@@ -358,6 +371,8 @@ impl Bytebuffer {
 }
 
 const frame_default_text : u8 = ' ' as u8;
+const frame_default_fg : Color = Color::Black;
+const frame_default_bg : Color = Color::White;
 
 impl Framebuffer {
     fn new(window: Vek) -> Framebuffer {
@@ -366,18 +381,19 @@ impl Framebuffer {
         return Framebuffer {
             window,
             len,
-            text:       vec![0; vlen],
-            fg:         vec![0; vlen],
-            bg:         vec![0; vlen],
+            text:       vec![frame_default_text; vlen],
+            fg:         vec![frame_default_fg; vlen],
+            bg:         vec![frame_default_bg; vlen],
             cursor:     vek(0,0),
             buffer:     Bytebuffer::new(),
         };
     }
 
+    // TODO: add clear in sub rec
     fn clear(&mut self) {
-        for i in self.text.iter_mut() {
-            *i = frame_default_text;
-        }
+        set(&mut self.text, frame_default_text);
+        set(&mut self.fg,   frame_default_fg);
+        set(&mut self.bg,   frame_default_bg);
     }
 
     fn put(&mut self, pos: Vek, src: &[u8]) {
@@ -455,19 +471,19 @@ impl Editor {
     fn run(&mut self) {
         while self.running {
             self.refresh_screen();
-            self.proces_input();
+            self.process_input();
         }
     }
 
     fn refresh_screen(&mut self) {
         self.framebuffer.push_frame();
+        if !CONF.retain_frame {
+            self.framebuffer.clear();
+        }
     }
 
-    fn proces_input(&mut self) {
+    fn process_input(&mut self) {
         let c = read_char();
-
-        let l = format!("input: {:?}", c);
-        self.framebuffer.put(vek(20,20), l.as_bytes());
 
         // TODO: more sophisticated cursor movement ...
         match c {
@@ -477,6 +493,10 @@ impl Editor {
             'l' => self.mv_cursor(Move::Right),
             _   => (),
         }
+
+        let p = self.framebuffer.cursor + vek(1,0);
+        let l = format!("input: {:?}", c);
+        self.framebuffer.put(p, l.as_bytes());
 
         self.running = c != CTRL_C;
     }

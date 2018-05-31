@@ -7,7 +7,7 @@ builddir:
 
 $(OUTDIR)/libterm.a: builddir term.c
 	gcc -c term.c -o $(OUTDIR)/term.o
-	ar -r cs $(OUTDIR)/libterm.a $(OUTDIR)/term.o # works on both linux and osx
+	#ar -r cs $(OUTDIR)/libterm.a $(OUTDIR)/term.o # works on both linux and osx
 
 native: builddir $(OUTDIR)/libterm.a
 
