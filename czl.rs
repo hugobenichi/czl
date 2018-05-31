@@ -149,9 +149,22 @@ struct Screen<'a> {
 }
 
 // Manage content of a file
+// Q: can I have a vec in a struct and another subslice pointing into that vec ?
+//    I would need to say that they both have the same lifetime as the struct.
 struct Filebuffer {
     // TODO
+    text:   Vec<u8>,    // original content of the file when loaded
+    lines:  Vec<Line>,  // subslices into the filebuffer or appendbuffer
+    file:   Vec<usize>, // the actual lines in the current files, as indexes into 'lines'
 }
+
+// A pair of offsets into a filebuffer for delimiting lines.
+#[derive(Debug, Clone, Copy)]
+struct Line {
+    start:  usize,      // inclusive
+    stop:   usize,      // exclusive
+}
+
 
 // Point to a place inside a Filebuffer
 struct Cursor<'a> {
@@ -327,10 +340,21 @@ fn reorder<T>(v1: &mut T, v2: &mut T) where T : Ord {
     std::mem::swap(v1, v2);
 }
 
+// CLEANUP: replace with memset if this is ever a thing in Rust
 fn set<T>(s: &mut [T], t: T) where T : Copy {
     for i in s.iter_mut() {
         *i = t;
     }
+}
+
+// CLEANUP: replace with std memchr when this make it into stable
+fn memchr(c: u8, s: &[u8]) -> Option<usize> {
+    for (i, &x) in s.iter().enumerate() {
+        if x == c {
+            return Some(i);
+        }
+    }
+    return None;
 }
 
 /* CORE TYPE IMPLEMENTATION */
@@ -453,6 +477,35 @@ impl Framebuffer {
         b.write_into(&mut stdout.lock());
     }
 }
+
+
+impl Filebuffer {
+    fn from_file(text: Vec<u8>) -> Filebuffer {
+
+        let mut lines = Vec::new();
+        let mut file = Vec::new();
+
+        {
+            let l = text.len();
+            let mut a = 0;
+            while a < l {
+                let b = match memchr('\n' as u8, &text[a..]) {
+                    Some(o) => a + o,
+                    None    => l,
+                };
+                lines.push(Line { start: a, stop: b });
+                a = b;
+            }
+        }
+
+        for i in 0..lines.len() {
+            file.push(i);
+        }
+
+        return Filebuffer { text, lines, file };
+    }
+}
+
 
 impl Editor {
 
