@@ -17,11 +17,13 @@ use std::cmp::max;
 
 /*
  * Next Steps:
- *
  *      - handle resize
  *      - handle colors ?
- *      - load a file a draw that file
- *      - add insert text
+ *      - add basic cursor navigation
+ *      - add header bar with filename
+ *      - add footer bar with last input and mode
+ *      - add text insert
+ *          commands: new line, line copy, insert mode, append char
  */
 
 
@@ -46,6 +48,8 @@ struct Editor {
     //  list of screens
     //  current screen layout
     //  Mode state machine
+
+    filebuffer: Filebuffer,
 }
 
 struct Config {
@@ -146,6 +150,8 @@ struct Bytebuffer {
 struct Screen<'a> {
     framebuffer:    &'a mut Framebuffer,
     window:         Rec,
+
+    // TODO: add Fileview and Filebuffer directly here too
 }
 
 // Manage content of a file
@@ -485,6 +491,26 @@ impl Framebuffer {
 }
 
 
+impl<'a> Screen<'a> {
+    // TODO: add lineno
+    // TODO: add horizontal offset
+    fn put_filebuffer(&mut self, offset: Vek, filebuffer: &Filebuffer) {
+        let Vek { x , y } = offset;
+        let stop = min(self.framebuffer.window.y, y + filebuffer.file.len() as i32);
+
+        for i in 0..stop {
+            self.framebuffer.put(vek(0,i + y), filebuffer.get_line(i + y));
+        }
+    }
+}
+
+
+impl Line {
+    fn to_slice<'a>(self, text: &'a[u8]) -> &'a[u8] {
+        &text[self.start..self.stop]
+    }
+}
+
 impl Filebuffer {
     fn from_file(text: Vec<u8>) -> Filebuffer {
 
@@ -500,7 +526,7 @@ impl Filebuffer {
                     None    => l,
                 };
                 lines.push(Line { start: a, stop: b });
-                a = b;
+                a = b + 1; // skip the '\n'
             }
         }
 
@@ -510,12 +536,18 @@ impl Filebuffer {
 
         Filebuffer { text, lines, file }
     }
+
+    fn get_line<'a>(&'a self, y: i32) -> &'a[u8] {
+        self.lines[y as usize].to_slice(&self.text)
+        //let Line { start, stop } = self.filebuffer.file[y as usize].to_slice(self)
+        //&filebuffer.text[start..stop];
+    }
 }
 
 
 impl Editor {
 
-    fn init() -> Editor {
+    fn init(filebuffer: Filebuffer) -> Editor {
         let window = term_size();
         let framebuffer = Framebuffer::new(window);
         let running = true;
@@ -524,6 +556,7 @@ impl Editor {
             window,
             framebuffer,
             running,
+            filebuffer,
         }
     }
 
@@ -535,9 +568,20 @@ impl Editor {
     }
 
     fn refresh_screen(&mut self) {
-        self.framebuffer.push_frame();
-        if !CONF.retain_frame {
-            self.framebuffer.clear();
+        {
+            let mut screen = Screen {
+                framebuffer: &mut self.framebuffer,
+                window: rec(0, 0, 10, 10),
+            };
+
+            screen.put_filebuffer(vek(0,0), &self.filebuffer);
+        }
+
+        {
+            self.framebuffer.push_frame();
+            if !CONF.retain_frame {
+                self.framebuffer.clear();
+            }
         }
     }
 
@@ -616,13 +660,13 @@ fn main()
 {
     term_set_raw();
 
-    /*
     let filename = file!();
     let buf = file_load(filename).unwrap();
-    file_lines_print(&buf);
-    */
 
-    Editor::init().run();
+    let filebuffer = Filebuffer::from_file(buf);
+    //file_lines_print(&buf);
+
+    Editor::init(filebuffer).run();
 
     term_restore();
 }
