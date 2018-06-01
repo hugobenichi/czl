@@ -19,7 +19,6 @@ use std::cmp::max;
  * Next Steps:
  *      - handle resize
  *      - handle colors ?
- *      - add basic cursor navigation
  *      - add header bar with filename
  *      - add footer bar with last input and mode
  *      - add text insert
@@ -202,7 +201,7 @@ fn vek(x: i32, y: i32) -> Vek {
 // TODO: rec ctor with width and height ??
 fn rec(x0: i32, y0: i32, x1: i32, y1: i32) -> Rec {
     let (a0, a1) = ordered(x0, x1);
-    let (b0, b1) = ordered(x0, x1);
+    let (b0, b1) = ordered(y0, y1);
     Rec {
         min: vek(a0, b0),
         max: vek(a1, b1),
@@ -368,6 +367,18 @@ fn memchr(c: u8, s: &[u8]) -> Option<usize> {
     None
 }
 
+fn clamp<'a, T>(s: &'a[T], l: usize) -> &'a[T] {
+    &s[..min(l, s.len())]
+}
+
+fn shift<'a, T>(s: &'a[T], o: usize) -> &'a[T] {
+    &s[min(o, s.len())..]
+}
+
+fn subslice<'a, T>(s: &'a[T], offset: usize, len: usize) -> &'a[T] {
+    clamp(shift(s, offset), len)
+}
+
 /* CORE TYPE IMPLEMENTATION */
 
 
@@ -493,13 +504,17 @@ impl Framebuffer {
 
 impl<'a> Screen<'a> {
     // TODO: add lineno
-    // TODO: add horizontal offset
-    fn put_filebuffer(&mut self, offset: Vek, filebuffer: &Filebuffer) {
-        let Vek { x , y } = offset;
-        let stop = min(self.framebuffer.window.y, y + filebuffer.file.len() as i32);
+    fn put_filebuffer(&mut self, fileoffset: Vek, filebuffer: &Filebuffer) {
+        let y_stop = min(self.window.h(), filebuffer.file.len() as i32 - fileoffset.y);
+        for i in 0..y_stop {
 
-        for i in 0..stop {
-            self.framebuffer.put(vek(0,i + y), filebuffer.get_line(i + y));
+            let lineoffset = vek(0, i);
+            let text_offset = fileoffset + lineoffset;
+            let frame_offset = self.window.min + lineoffset;
+
+            let mut line = filebuffer.get_line(text_offset);
+            line = clamp(line, self.window.w() as usize);
+            self.framebuffer.put(frame_offset, line);
         }
     }
 }
@@ -537,10 +552,11 @@ impl Filebuffer {
         Filebuffer { text, lines, file }
     }
 
-    fn get_line<'a>(&'a self, y: i32) -> &'a[u8] {
-        self.lines[y as usize].to_slice(&self.text)
-        //let Line { start, stop } = self.filebuffer.file[y as usize].to_slice(self)
-        //&filebuffer.text[start..stop];
+    fn get_line<'a>(&'a self, offset: Vek) -> &'a[u8] {
+        let x = offset.x as usize;
+        let y = offset.y as usize;
+        let line = self.lines[y].to_slice(&self.text);
+        shift(line, x)
     }
 }
 
@@ -548,7 +564,7 @@ impl Filebuffer {
 impl Editor {
 
     fn init(filebuffer: Filebuffer) -> Editor {
-        let window = term_size();
+        let window = Term::size();
         let framebuffer = Framebuffer::new(window);
         let running = true;
 
@@ -569,9 +585,10 @@ impl Editor {
 
     fn refresh_screen(&mut self) {
         {
+            let window = rec(0, 0, 40, 40) + self.framebuffer.cursor;
             let mut screen = Screen {
                 framebuffer: &mut self.framebuffer,
-                window: rec(0, 0, 10, 10),
+                window,
             };
 
             screen.put_filebuffer(vek(0,0), &self.filebuffer);
@@ -658,7 +675,7 @@ fn file_lines_print(buf: &[u8])
 
 fn main()
 {
-    term_set_raw();
+    let term = Term::set_raw();
 
     let filename = file!();
     let buf = file_load(filename).unwrap();
@@ -667,8 +684,6 @@ fn main()
     //file_lines_print(&buf);
 
     Editor::init(filebuffer).run();
-
-    term_restore();
 }
 
 
@@ -693,40 +708,51 @@ extern "C" {
     fn terminal_set_raw() -> i32;
 }
 
-fn term_size() -> Vek {
-    unsafe {
-        let ws = terminal_get_size();
-        vek(ws.ws_col as i32, ws.ws_row as i32)
+// Empty object used to safely control terminal raw mode and properly exit raw mode at scope exit.
+struct Term {
+}
+
+impl Term {
+    fn size() -> Vek {
+        unsafe {
+            let ws = terminal_get_size();
+            vek(ws.ws_col as i32, ws.ws_row as i32)
+        }
+    }
+
+    fn set_raw() -> Term {
+        let stdout = io::stdout();
+        let mut h = stdout.lock();
+        h.write(term_cursor_save).unwrap();
+        h.write(term_switch_offscreen).unwrap();
+        h.write(term_switch_mouse_event_on).unwrap();
+        h.write(term_switch_mouse_tracking_on).unwrap();
+        h.flush().unwrap();
+
+        unsafe {
+            let _ = terminal_set_raw();
+        }
+
+        Term { }
     }
 }
 
-fn term_set_raw() {
-    let stdout = io::stdout();
-    let mut h = stdout.lock();
-    h.write(term_cursor_save).unwrap();
-    h.write(term_switch_offscreen).unwrap();
-    h.write(term_switch_mouse_event_on).unwrap();
-    h.write(term_switch_mouse_tracking_on).unwrap();
-    h.flush().unwrap();
+impl Drop for Term {
+    fn drop(&mut self) {
+        let stdout = io::stdout();
+        let mut h = stdout.lock();
+        h.write(term_switch_mouse_tracking_off).unwrap();
+        h.write(term_switch_mouse_event_off).unwrap();
+        h.write(term_switch_mainscreen).unwrap();
+        h.write(term_cursor_restore).unwrap();
+        h.flush().unwrap();
 
-    unsafe {
-        let _ = terminal_set_raw();
+        unsafe {
+            terminal_restore();
+        }
     }
 }
 
-fn term_restore() {
-    let stdout = io::stdout();
-    let mut h = stdout.lock();
-    h.write(term_switch_mouse_tracking_off).unwrap();
-    h.write(term_switch_mouse_event_off).unwrap();
-    h.write(term_switch_mainscreen).unwrap();
-    h.write(term_cursor_restore).unwrap();
-    h.flush().unwrap();
-
-    unsafe {
-        terminal_restore();
-    }
-}
 
 const term_start                      : &[u8] = b"\x1b[";
 const term_finish                     : &[u8] = b"\x1b[0m";
