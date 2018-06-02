@@ -28,7 +28,15 @@ use std::cmp::max;
 // Global constant that controls a bunch of options.
 const CONF : Config = Config {
     draw_screen:        true,
+    draw_colors:        true,
     retain_frame:       false,
+
+    debug_bounds:       true,
+
+    color_default:          Colorcell { fg: Color::Black,   bg: Color::White },
+    color_header_active:    Colorcell { fg: Color::Gray(2), bg: Color::Yellow },
+    color_header_inactive:  Colorcell { fg: Color::Gray(2), bg: Color::Cyan },
+    color_footer:           Colorcell { fg: Color::White,   bg: Color::Gray(2) },
 };
 
 
@@ -55,9 +63,16 @@ struct Editor {
 }
 
 struct Config {
-    // TODO
     draw_screen: bool,
+    draw_colors: bool,
     retain_frame:bool,
+
+    debug_bounds: bool,
+
+    color_default:          Colorcell,
+    color_header_active:    Colorcell,
+    color_header_inactive:  Colorcell,
+    color_footer:           Colorcell,
 }
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
@@ -76,7 +91,7 @@ struct Rec {
 
 type Colorcode = i32;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 enum Color {
     /* First 8 ansi colors */
     Black,
@@ -100,6 +115,16 @@ enum Color {
     RGB216 { r: i32, g: i32, b: i32 },
     /* 24 level of Grays */
     Gray(i32),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Colorcell {
+    fg: Color,
+    bg: Color,
+}
+
+fn colors(fg: Color, bg: Color) -> Colorcell {
+    Colorcell { fg, bg }
 }
 
 #[derive(Debug)]
@@ -346,23 +371,23 @@ fn colorcode(c : Color) -> Colorcode {
     match c {
         // TODO !
         Color::Black                    => 0,
-        Color::Red                      => 0,
-        Color::Green                    => 0,
-        Color::Yellow                   => 0,
-        Color::Blue                     => 0,
-        Color::Magenta                  => 0,
-        Color::Cyan                     => 0,
-        Color::White                    => 0,
-        Color::BoldBlack                => 0,
-        Color::BoldRed                  => 0,
-        Color::BoldGreen                => 0,
-        Color::BoldYellow               => 0,
-        Color::BoldBlue                 => 0,
-        Color::BoldMagenta              => 0,
-        Color::BoldCyan                 => 0,
-        Color::BoldWhite                => 0,
-        Color::RGB216 { r, g, b }       => 0,
-        Color::Gray(g)                  => 0,
+        Color::Red                      => 1,
+        Color::Green                    => 2,
+        Color::Yellow                   => 3,
+        Color::Blue                     => 4,
+        Color::Magenta                  => 5,
+        Color::Cyan                     => 6,
+        Color::White                    => 7,
+        Color::BoldBlack                => 8,
+        Color::BoldRed                  => 9,
+        Color::BoldGreen                => 10,
+        Color::BoldYellow               => 11,
+        Color::BoldBlue                 => 12,
+        Color::BoldMagenta              => 13,
+        Color::BoldCyan                 => 14,
+        Color::BoldWhite                => 15,
+        Color::RGB216 { r, g, b }       => 15 + (r + 6 * (g + 6 * b)),
+        Color::Gray(g)                  => 255 - g,
     }
 }
 
@@ -483,7 +508,7 @@ impl Framebuffer {
         fill(&mut self.bg,   frame_default_bg);
     }
 
-    fn put(&mut self, pos: Vek, src: &[u8]) {
+    fn put_line(&mut self, pos: Vek, src: &[u8]) {
         assert!(self.window.rec().contains(pos));
 
         let maxlen = (self.window.x - pos.x) as usize;
@@ -493,6 +518,30 @@ impl Framebuffer {
         let stop = start + len;
 
         copy(&mut self.text[start..stop], &src[..len]);
+    }
+
+    // area is inclusive
+    fn put_color(&mut self, area: Rec, colors: Colorcell) {
+        if CONF.debug_bounds {
+            assert!(0 <= area.x0());
+            assert!(0 <= area.y0());
+            assert!(area.x1() <= self.window.x);
+            assert!(area.y1() <= self.window.y);
+        }
+
+        let dx = self.window.x as usize;
+        let mut x0 = max(0, area.x0()) as usize;
+        let mut x1 = min(area.x1() + 1, self.window.x) as usize;
+
+        let y0 = max(0, area.y0());
+        let y1 = min(area.y1() + 1, self.window.y);
+
+        for i in y0..y1 {
+            fill(&mut self.fg[x0..x1], colors.fg);
+            fill(&mut self.bg[x0..x1], colors.bg);
+            x0 += dx;
+            x1 += dx;
+        }
     }
 
     fn set_cursor(&mut self, new_cursor: Vek) {
@@ -513,10 +562,9 @@ impl Framebuffer {
             return
         }
 
-        let b = &mut self.buffer;
-        b.rewind();
-        b.put(term_cursor_hide);
-        b.put(term_gohome);
+        self.buffer.rewind();
+        self.buffer.put(term_cursor_hide);
+        self.buffer.put(term_gohome);
 
         let w = self.window.x as usize;
         let mut l = 0;
@@ -524,20 +572,43 @@ impl Framebuffer {
         for i in 0..self.window.y {
             if i > 0 {
                 // Do not put "\r\n" on the last line
-                b.put(term_newline);
+                self.buffer.put(term_newline);
             }
-            b.put(&self.text[l..r]);
+
+            if CONF.draw_colors {
+                let mut j = l;
+                loop {
+                    let k = self.find_color_end(j, r);
+                    // TODO: put color !
+                    self.buffer.put(&self.text[j..k]);
+                    if k == r {
+                        break;
+                    }
+                    j = k;
+                }
+            } else {
+                self.buffer.put(&self.text[l..r]);
+            }
+
             l += w;
             r += w;
         }
 
         // Terminal cursor coodinates start at (1,1)
         let cursor_command = format!("\x1b[{};{}H", self.cursor.y + 1, self.cursor.x + 1);
-        b.put(cursor_command.as_bytes());
-        b.put(term_cursor_show);
+        self.buffer.put(cursor_command.as_bytes());
+        self.buffer.put(term_cursor_show);
 
         let stdout = io::stdout();
-        b.write_into(&mut stdout.lock());
+        self.buffer.write_into(&mut stdout.lock());
+    }
+
+    fn find_color_end(&self, a: usize, stop: usize) -> usize {
+        let mut b = a;
+        while b < stop && self.fg[a] == self.fg[b] && self.bg[a] == self.bg[b] {
+            b += 1;
+        }
+        b
     }
 }
 
@@ -566,13 +637,13 @@ impl<'a> Screen<'a> {
 
             let mut line = filebuffer.get_line(text_offset);
             line = clamp(line, self.textarea.w() as usize);
-            self.framebuffer.put(frame_offset, line);
+            self.framebuffer.put_line(frame_offset, line);
         }
     }
 
     fn put_header(&mut self) {
         let header_string = format!("{}  {:?}", self.fileview.filepath, self.fileview.movement_mode);
-        self.framebuffer.put(self.header, header_string.as_bytes());
+        self.framebuffer.put_line(self.header, header_string.as_bytes());
     }
 }
 
@@ -674,7 +745,9 @@ impl Editor {
         }
 
         {
-            self.framebuffer.put(self.footer, b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
+            self.framebuffer.put_line(self.footer, b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
+            // BUG: this crash if y1 is too bug !!
+            self.framebuffer.put_color(rec(3,0,20,10), colors(Color::White, Color::Black));
         }
 
         {
@@ -699,7 +772,7 @@ impl Editor {
 
         let p = self.framebuffer.cursor + vek(1,0);
         let l = format!("input: {:?}", c);
-        self.framebuffer.put(p, l.as_bytes());
+        self.framebuffer.put_line(p, l.as_bytes());
 
         self.running = c != CTRL_C;
     }
