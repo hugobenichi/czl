@@ -39,6 +39,8 @@ const CONF : Config = Config {
 // The core editor structure
 struct Editor {
     window:         Vek,              // The dimensions of the editor and backend terminal window
+    mainscreen:     Rec,              // The screen area for displaying file content and menus.
+    footer:         Vek,
     framebuffer:    Framebuffer,
 
     running: bool,
@@ -153,14 +155,22 @@ struct Screen<'a> {
     // TODO: add Fileview and Filebuffer directly here too
 }
 
+struct Textbuffer {
+    text:   Vec<u8>,    // original content of the file when loaded
+    lines:  Vec<Line>,  // subslices into the filebuffer or appendbuffer
+}
+
+struct Textsnapshot {
+    line_indexes: Vec<usize> // the actual lines in the current files, as indexes into 'lines'
+}
+
 // Manage content of a file
 // Q: can I have a vec in a struct and another subslice pointing into that vec ?
 //    I would need to say that they both have the same lifetime as the struct.
 struct Filebuffer {
-    // TODO
-    text:   Vec<u8>,    // original content of the file when loaded
-    lines:  Vec<Line>,  // subslices into the filebuffer or appendbuffer
-    file:   Vec<usize>, // the actual lines in the current files, as indexes into 'lines'
+    textbuffer: Textbuffer,
+    previous_snapshots: Vec<Textsnapshot>,
+    current_snapshot: Textsnapshot,
 }
 
 // A pair of offsets into a filebuffer for delimiting lines.
@@ -170,6 +180,14 @@ struct Line {
     stop:   usize,      // exclusive
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Linerange {
+    // TODO: would that be useful to represent a file as a list of line range ?
+    //       what about fragmentation after a while ? Aren't Lineranges going to collapse to single
+    //       line ranges ?
+    start:  usize,
+    stop:   usize,
+}
 
 // Point to a place inside a Filebuffer
 struct Cursor<'a> {
@@ -503,9 +521,12 @@ impl Framebuffer {
 
 
 impl<'a> Screen<'a> {
+    // TODO
+    //fn init(screenwindow: Rec, framebuffer: Framebuffer)
+
     // TODO: add lineno
     fn put_filebuffer(&mut self, fileoffset: Vek, filebuffer: &Filebuffer) {
-        let y_stop = min(self.window.h(), filebuffer.file.len() as i32 - fileoffset.y);
+        let y_stop = min(self.window.h(), filebuffer.nlines() - fileoffset.y);
         for i in 0..y_stop {
 
             let lineoffset = vek(0, i);
@@ -530,7 +551,7 @@ impl Filebuffer {
     fn from_file(text: Vec<u8>) -> Filebuffer {
 
         let mut lines = Vec::new();
-        let mut file = Vec::new();
+        let mut line_indexes = Vec::new();
 
         {
             let l = text.len();
@@ -546,17 +567,30 @@ impl Filebuffer {
         }
 
         for i in 0..lines.len() {
-            file.push(i);
+            line_indexes.push(i);
         }
 
-        Filebuffer { text, lines, file }
+        Filebuffer {
+            textbuffer:         Textbuffer { text, lines },
+            previous_snapshots: Vec::new(),
+            current_snapshot:   Textsnapshot { line_indexes },
+        }
+    }
+
+    fn nlines(&self) -> i32 {
+        self.current_snapshot.line_indexes.len() as i32
     }
 
     fn get_line<'a>(&'a self, offset: Vek) -> &'a[u8] {
         let x = offset.x as usize;
         let y = offset.y as usize;
-        let line = self.lines[y].to_slice(&self.text);
+        let line_idx = self.current_snapshot.line_indexes[y];
+        let line = self.textbuffer.lines[line_idx].to_slice(&self.textbuffer.text);
         shift(line, x)
+    }
+
+    fn append(&mut self, c: u8) {
+        
     }
 }
 
@@ -567,9 +601,13 @@ impl Editor {
         let window = Term::size();
         let framebuffer = Framebuffer::new(window);
         let running = true;
+        let footer = vek(0, window.y - 1);
+        let mainscreen = vek(window.x, window.y - 1).rec();
 
         Editor {
             window,
+            mainscreen,
+            footer,
             framebuffer,
             running,
             filebuffer,
@@ -585,13 +623,19 @@ impl Editor {
 
     fn refresh_screen(&mut self) {
         {
-            let window = rec(0, 0, 40, 40) + self.framebuffer.cursor;
+            // TODO: use screen constructor
             let mut screen = Screen {
                 framebuffer: &mut self.framebuffer,
-                window,
+                // TODO: use Fileview to store metadata
+                window: self.mainscreen,
             };
 
-            screen.put_filebuffer(vek(0,0), &self.filebuffer);
+            let cursor = vek(0,0);
+            screen.put_filebuffer(cursor, &self.filebuffer);
+        }
+
+        {
+            self.framebuffer.put(self.footer, b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
         }
 
         {
