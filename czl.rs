@@ -19,7 +19,6 @@ use std::cmp::max;
  * Next Steps:
  *      - handle resize
  *      - handle colors ?
- *      - add header bar with filename
  *      - add footer bar with last input and mode
  *      - add text insert
  *          commands: new line, line copy, insert mode, append char
@@ -50,7 +49,9 @@ struct Editor {
     //  current screen layout
     //  Mode state machine
 
+    // For the time being, only one file can be loaded and edited per program.
     filebuffer: Filebuffer,
+    fileview:   Fileview,
 }
 
 struct Config {
@@ -101,6 +102,7 @@ enum Color {
     Gray(i32),
 }
 
+#[derive(Debug)]
 enum Move {
     Left,
     Right,
@@ -110,6 +112,7 @@ enum Move {
     End,
 }
 
+#[derive(Debug)]
 enum MovementMode {
     Chars,
     Lines,
@@ -151,8 +154,10 @@ struct Bytebuffer {
 struct Screen<'a> {
     framebuffer:    &'a mut Framebuffer,
     window:         Rec,
-
-    // TODO: add Fileview and Filebuffer directly here too
+    textarea:       Rec,
+    header:         Vek,
+    fileview:       &'a Fileview,
+    // TODO: consider adding Filebuffer directly here too
 }
 
 struct Textbuffer {
@@ -196,12 +201,29 @@ struct Cursor<'a> {
 
 // Store states related to navigation in a given file.
 struct Fileview {
-    relative_lineno: bool,
-    movement_mode: MovementMode,
-    show_token: bool,
-    show_neighbor: bool,
-    show_selection: bool,
+    filepath:           String,
+    relative_lineno:    bool,
+    movement_mode:      MovementMode,
+    show_token:         bool,
+    show_neighbor:      bool,
+    show_selection:     bool,
+    is_active:          bool,
+    //cursor:
     //selection:  Option<&[Selection]>
+}
+
+impl Fileview {
+    fn default(filepath: String) -> Fileview {
+        Fileview {
+            filepath,
+            relative_lineno:    false,
+            movement_mode:      MovementMode::Chars,
+            show_token:         false,
+            show_neighbor:      false,
+            show_selection:     false,
+            is_active:          true,
+        }
+    }
 }
 
 
@@ -401,7 +423,7 @@ fn subslice<'a, T>(s: &'a[T], offset: usize, len: usize) -> &'a[T] {
 
 
 impl Bytebuffer {
-    fn new() -> Bytebuffer {
+    fn mk_bytebuffer() -> Bytebuffer {
         Bytebuffer {
             bytes:  vec![0; 64 * 1024],
             cursor: 0,
@@ -439,7 +461,7 @@ const frame_default_fg : Color = Color::Black;
 const frame_default_bg : Color = Color::White;
 
 impl Framebuffer {
-    fn new(window: Vek) -> Framebuffer {
+    fn mk_framebuffer(window: Vek) -> Framebuffer {
         let len = window.x * window.y;
         let vlen = len as usize;
 
@@ -450,7 +472,7 @@ impl Framebuffer {
             fg:         vec![frame_default_fg; vlen],
             bg:         vec![frame_default_bg; vlen],
             cursor:     vek(0,0),
-            buffer:     Bytebuffer::new(),
+            buffer:     Bytebuffer::mk_bytebuffer(),
         }
     }
 
@@ -521,22 +543,36 @@ impl Framebuffer {
 
 
 impl<'a> Screen<'a> {
-    // TODO
-    //fn init(screenwindow: Rec, framebuffer: Framebuffer)
+    fn mk_screen<'b>(window: Rec, framebuffer: &'b mut Framebuffer, fileview: &'b Fileview) -> Screen<'b> {
+        let textarea = Rec { min: window.min + vek(0,1), max: window.max };
+        let header = window.min;
+        Screen {
+            framebuffer,
+            window,
+            textarea,
+            header,
+            fileview,
+        }
+    }
 
     // TODO: add lineno
     fn put_filebuffer(&mut self, fileoffset: Vek, filebuffer: &Filebuffer) {
-        let y_stop = min(self.window.h(), filebuffer.nlines() - fileoffset.y);
+        let y_stop = min(self.textarea.h(), filebuffer.nlines() - fileoffset.y);
         for i in 0..y_stop {
 
             let lineoffset = vek(0, i);
             let text_offset = fileoffset + lineoffset;
-            let frame_offset = self.window.min + lineoffset;
+            let frame_offset = self.textarea.min + lineoffset;
 
             let mut line = filebuffer.get_line(text_offset);
-            line = clamp(line, self.window.w() as usize);
+            line = clamp(line, self.textarea.w() as usize);
             self.framebuffer.put(frame_offset, line);
         }
+    }
+
+    fn put_header(&mut self) {
+        let header_string = format!("{}  {:?}", self.fileview.filepath, self.fileview.movement_mode);
+        self.framebuffer.put(self.header, header_string.as_bytes());
     }
 }
 
@@ -554,6 +590,11 @@ impl Filebuffer {
         let mut line_indexes = Vec::new();
 
         {
+            // TODO: try using split iterator
+            //for (i, line) in buf.split(|c| *c == newline).enumerate() {
+            //    println!("{}: {}", i, str::from_utf8(line).unwrap())
+            //}
+
             let l = text.len();
             let mut a = 0;
             while a < l {
@@ -590,19 +631,20 @@ impl Filebuffer {
     }
 
     fn append(&mut self, c: u8) {
-        
+        // TODO
     }
 }
 
 
 impl Editor {
 
-    fn init(filebuffer: Filebuffer) -> Editor {
+    fn mk_editor(filename: String, filebuffer: Filebuffer) -> Editor {
         let window = Term::size();
-        let framebuffer = Framebuffer::new(window);
+        let framebuffer = Framebuffer::mk_framebuffer(window);
         let running = true;
         let footer = vek(0, window.y - 1);
         let mainscreen = vek(window.x, window.y - 1).rec();
+        let fileview = Fileview::default(filename);
 
         Editor {
             window,
@@ -611,6 +653,7 @@ impl Editor {
             framebuffer,
             running,
             filebuffer,
+            fileview,
         }
     }
 
@@ -623,14 +666,10 @@ impl Editor {
 
     fn refresh_screen(&mut self) {
         {
-            // TODO: use screen constructor
-            let mut screen = Screen {
-                framebuffer: &mut self.framebuffer,
-                // TODO: use Fileview to store metadata
-                window: self.mainscreen,
-            };
+            let mut screen = Screen::mk_screen(self.mainscreen, &mut self.framebuffer, &self.fileview);
 
             let cursor = vek(0,0);
+            screen.put_header();
             screen.put_filebuffer(cursor, &self.filebuffer);
         }
 
@@ -692,8 +731,7 @@ type Rez<T> = result::Result<T, String>;
 
 // TODO: associate this to a Filebuffer struct
 // TODO: probably I need to collapse all errors into strings, and create my own Result alias ...
-fn file_load(filename: &str) -> io::Result<Vec<u8>>
-{
+fn file_load(filename: &str) -> io::Result<Vec<u8>> {
     let fileinfo = try!(fs::metadata(filename));
     let size = fileinfo.len() as usize;
 
@@ -709,16 +747,7 @@ fn file_load(filename: &str) -> io::Result<Vec<u8>>
     Ok(buf)
 }
 
-fn file_lines_print(buf: &[u8])
-{
-    let newline = '\n' as u8;
-    for (i, line) in buf.split(|c| *c == newline).enumerate() {
-        println!("{}: {}", i, str::from_utf8(line).unwrap())
-    }
-}
-
-fn main()
-{
+fn main() {
     let term = Term::set_raw();
 
     let filename = file!();
@@ -727,7 +756,7 @@ fn main()
     let filebuffer = Filebuffer::from_file(buf);
     //file_lines_print(&buf);
 
-    Editor::init(filebuffer).run();
+    Editor::mk_editor(filename.to_string(), filebuffer).run();
 }
 
 
