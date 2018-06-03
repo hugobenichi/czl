@@ -36,6 +36,7 @@ const CONF : Config = Config {
     color_header_active:    Colorcell { fg: Color::Gray(2), bg: Color::Yellow },
     color_header_inactive:  Colorcell { fg: Color::Gray(2), bg: Color::Cyan },
     color_footer:           Colorcell { fg: Color::White,   bg: Color::Gray(2) },
+    color_lineno:           Colorcell { fg: Color::Green,   bg: Color::Gray(2) },
 };
 
 
@@ -72,6 +73,7 @@ struct Config {
     color_header_active:    Colorcell,
     color_header_inactive:  Colorcell,
     color_footer:           Colorcell,
+    color_lineno:           Colorcell,
 }
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
@@ -122,7 +124,7 @@ struct Colorcell {
     bg: Color,
 }
 
-fn colors(fg: Color, bg: Color) -> Colorcell {
+fn colorcell(fg: Color, bg: Color) -> Colorcell {
     Colorcell { fg, bg }
 }
 
@@ -178,10 +180,18 @@ struct Bytebuffer {
 struct Screen<'a> {
     framebuffer:    &'a mut Framebuffer,
     window:         Rec,
+    linenoarea:     Rec,
     textarea:       Rec,
-    header:         Vek,
+    header:         Rec,
     fileview:       &'a Fileview,
     // TODO: consider adding Filebuffer directly here too
+}
+
+enum Draw {
+    Nothing,
+    All,
+    Header,
+    Text,
 }
 
 struct Textbuffer {
@@ -283,6 +293,41 @@ impl Rec {
 
     fn area(self) -> i32 { self.w() * self.h() }
     fn size(self) -> Vek { vek(self.w(), self.h()) }
+
+    fn raw(self, y: i32) -> Rec {
+        assert!(self.min.y <= y);
+        assert!(y < self.max.y);
+        rec(self.min.x, y, self.max.x, y + 1)
+    }
+
+    fn column(self, x: i32) -> Rec {
+        assert!(self.min.x <= x);
+        assert!(x < self.max.x);
+        rec(x, self.min.y, x + 1, self.max.y)
+    }
+
+    // TODO: should x be forbidden from matching the bounds (i.e no empty output)
+    fn vsplit(self, x: i32) -> (Rec, Rec) {
+        assert!(self.min.x <= x);
+        assert!(x < self.max.x);
+
+        let left = rec(self.min.x, self.min.y, x, self.max.y);
+        let right = rec(x, self.min.y, self.max.x, self.max.y);
+
+        (left, right)
+    }
+
+    fn hsplit(self, y: i32) -> (Rec, Rec) {
+        assert!(self.min.y <= y);
+        assert!(y < self.max.y);
+
+        let up = rec(self.min.x, self.min.y, self.max.x, y);
+        let down = rec(self.min.x, y, self.max.x, self.max.y);
+
+        (up, down)
+    }
+
+    // TODO: add a hsplit function
 }
 
 
@@ -519,21 +564,22 @@ impl Framebuffer {
         copy(&mut self.text[start..stop], &src[..len]);
     }
 
-    // area is inclusive
+    // area.min is inclusive, area.max is exclusive
+    // BUG: this crash if y1 is too big ??
     fn put_color(&mut self, area: Rec, colors: Colorcell) {
         if CONF.debug_bounds {
             assert!(0 <= area.x0());
             assert!(0 <= area.y0());
-            assert!(area.x1() <= self.window.x);
-            assert!(area.y1() <= self.window.y);
+            assert!(area.x1() < self.window.x);
+            assert!(area.y1() < self.window.y);
         }
 
         let dx = self.window.x as usize;
         let mut x0 = max(0, area.x0()) as usize;
-        let mut x1 = min(area.x1() + 1, self.window.x) as usize;
+        let mut x1 = min(area.x1(), self.window.x) as usize;
 
         let y0 = max(0, area.y0());
-        let y1 = min(area.y1() + 1, self.window.y);
+        let y1 = min(area.y1(), self.window.y);
 
         for i in y0..y1 {
             fill(&mut self.fg[x0..x1], colors.fg);
@@ -619,35 +665,63 @@ impl Framebuffer {
 
 impl<'a> Screen<'a> {
     fn mk_screen<'b>(window: Rec, framebuffer: &'b mut Framebuffer, fileview: &'b Fileview) -> Screen<'b> {
-        let textarea = Rec { min: window.min + vek(0,1), max: window.max };
-        let header = window.min;
+        let lineno_len = 5;
+        let lineno_offset = vek(lineno_len, 0);
+
+        let text_min = window.min + vek(0,1);
+        let max_y = vek(0, window.max.y);
+        let max_x = vek(window.max.x, 0);
+
+        // TODO: use vsplit & hsplit !
+        let linenoarea  = Rec { min: text_min,                  max: max_y + lineno_offset };
+        let textarea    = Rec { min: text_min + lineno_offset,  max: max_x + max_y };
+        let header = window.raw(0);
         Screen {
             framebuffer,
             window,
+            linenoarea,
             textarea,
             header,
             fileview,
         }
     }
 
-    // TODO: add lineno
-    fn put_filebuffer(&mut self, fileoffset: Vek, filebuffer: &Filebuffer) {
-        let y_stop = min(self.textarea.h(), filebuffer.nlines() - fileoffset.y);
-        for i in 0..y_stop {
+    fn draw(&mut self, draw: Draw, fileoffset: Vek, filebuffer: &Filebuffer) {
+        // TODO: use draw and only redraw what's needed
+        // BUG: put_color crashes
 
-            let lineoffset = vek(0, i);
-            let text_offset = fileoffset + lineoffset;
-            let frame_offset = self.textarea.min + lineoffset;
-
-            let mut line = filebuffer.get_line(text_offset);
-            line = clamp(line, self.textarea.w() as usize);
-            self.framebuffer.put_line(frame_offset, line);
+        // header
+        {
+                let header_string = format!("{}  {:?}", self.fileview.filepath, self.fileview.movement_mode);
+                self.framebuffer.put_line(self.header.min, header_string.as_bytes());
+                //self.framebuffer.put_color(self.header, CONF.color_header_active);
         }
-    }
 
-    fn put_header(&mut self) {
-        let header_string = format!("{}  {:?}", self.fileview.filepath, self.fileview.movement_mode);
-        self.framebuffer.put_line(self.header, header_string.as_bytes());
+        // filebuffer content
+        {
+            let y_stop = min(self.textarea.h(), filebuffer.nlines() - fileoffset.y);
+            for i in 0..y_stop {
+
+                let lineoffset = vek(0, i);
+                let text_offset = fileoffset + lineoffset;
+                let frame_offset = self.textarea.min + lineoffset;
+
+                let mut line = filebuffer.get_line(text_offset);
+                line = clamp(line, self.textarea.w() as usize);
+                self.framebuffer.put_line(frame_offset, line);
+            }
+        }
+
+        // lineno
+        {
+            // TODO: add fileoffset !
+            // TODO: add relative offset support !
+            for i in 0..self.textarea.h() {
+                let lineno = (i + 1).to_string();
+                self.framebuffer.put_line(self.linenoarea.min + vek(0,i), lineno.as_bytes());
+            }
+            //self.framebuffer.put_color(self.linenoarea, CONF.color_lineno);
+        }
     }
 }
 
@@ -744,14 +818,11 @@ impl Editor {
             let mut screen = Screen::mk_screen(self.mainscreen, &mut self.framebuffer, &self.fileview);
 
             let cursor = vek(0,0);
-            screen.put_header();
-            screen.put_filebuffer(cursor, &self.filebuffer);
+            screen.draw(Draw::All, cursor, &self.filebuffer);
         }
 
         {
             self.framebuffer.put_line(self.footer, b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
-            // BUG: this crash if y1 is too bug !!
-            self.framebuffer.put_color(rec(3,0,20,10), colors(Color::White, Color::Black));
         }
 
         {
