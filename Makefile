@@ -17,7 +17,7 @@ $(OUTDIR)/czl: czl.rs
 build: builddir native $(OUTDIR)/czl
 
 run: build
-	$(OUTDIR)/czl
+	env RUST_BACKTRACE=1 $(OUTDIR)/czl
 
 clean:
 	rm -rf $(OUTDIR)

@@ -18,7 +18,6 @@ use std::cmp::max;
 /*
  * Next Steps:
  *      - handle resize
- *      - handle colors ?
  *      - add footer bar with last input and mode
  *      - add text insert
  *          commands: new line, line copy, insert mode, append char
@@ -459,7 +458,7 @@ impl Bytebuffer {
         self.cursor = 0
     }
 
-    fn put(&mut self, src: &[u8]) {
+    fn append(&mut self, src: &[u8]) {
         let dst = &mut self.bytes;
         let l = src.len();
         let c1 = self.cursor;
@@ -563,8 +562,8 @@ impl Framebuffer {
         }
 
         self.buffer.rewind();
-        self.buffer.put(term_cursor_hide);
-        self.buffer.put(term_gohome);
+        self.buffer.append(term_cursor_hide);
+        self.buffer.append(term_gohome);
 
         let w = self.window.x as usize;
         let mut l = 0;
@@ -572,22 +571,27 @@ impl Framebuffer {
         for i in 0..self.window.y {
             if i > 0 {
                 // Do not put "\r\n" on the last line
-                self.buffer.put(term_newline);
+                self.buffer.append(term_newline);
             }
 
             if CONF.draw_colors {
                 let mut j = l;
                 loop {
                     let k = self.find_color_end(j, r);
-                    // TODO: put color !
-                    self.buffer.put(&self.text[j..k]);
+
+                    // PERF: better color command creation without multiple string allocs.
+                    let fg_code = colorcode(self.fg[j]);
+                    let bg_code = colorcode(self.bg[j]);
+                    self.buffer.append(format!("\x1b[38;5;{};48;5;{}m", fg_code, bg_code).as_bytes());
+
+                    self.buffer.append(&self.text[j..k]);
                     if k == r {
                         break;
                     }
                     j = k;
                 }
             } else {
-                self.buffer.put(&self.text[l..r]);
+                self.buffer.append(&self.text[l..r]);
             }
 
             l += w;
@@ -596,8 +600,8 @@ impl Framebuffer {
 
         // Terminal cursor coodinates start at (1,1)
         let cursor_command = format!("\x1b[{};{}H", self.cursor.y + 1, self.cursor.x + 1);
-        self.buffer.put(cursor_command.as_bytes());
-        self.buffer.put(term_cursor_show);
+        self.buffer.append(cursor_command.as_bytes());
+        self.buffer.append(term_cursor_show);
 
         let stdout = io::stdout();
         self.buffer.write_into(&mut stdout.lock());
@@ -821,15 +825,23 @@ fn file_load(filename: &str) -> io::Result<Vec<u8>> {
 }
 
 fn main() {
-    let term = Term::set_raw();
+    let rez;
 
-    let filename = file!();
-    let buf = file_load(filename).unwrap();
+    {
+        let term = Term::set_raw();
 
-    let filebuffer = Filebuffer::from_file(buf);
-    //file_lines_print(&buf);
+        let filename = file!();
+        let buf = file_load(filename).unwrap();
 
-    Editor::mk_editor(filename.to_string(), filebuffer).run();
+        let filebuffer = Filebuffer::from_file(buf);
+        //file_lines_print(&buf);
+
+        rez = std::panic::catch_unwind(|| {
+            Editor::mk_editor(filename.to_string(), filebuffer).run();
+        });
+    }
+
+    rez.unwrap();
 }
 
 
