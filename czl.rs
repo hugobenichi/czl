@@ -14,7 +14,6 @@ use std::cmp::min;
 use std::cmp::max;
 
 
-
 /*
  * Next Steps:
  *      - handle resize
@@ -31,6 +30,7 @@ const CONF : Config = Config {
     retain_frame:       false,
     no_raw_mode:        false, //true,
 
+    debug_console:      true,
     debug_bounds:       true,
 
     color_default:          Colorcell { fg: Color::Black,   bg: Color::White },
@@ -38,8 +38,11 @@ const CONF : Config = Config {
     color_header_inactive:  Colorcell { fg: Color::Gray(2), bg: Color::Cyan },
     color_footer:           Colorcell { fg: Color::White,   bg: Color::Gray(2) },
     color_lineno:           Colorcell { fg: Color::Green,   bg: Color::Gray(2) },
+    color_console:          Colorcell { fg: Color::Red,     bg: Color::Gray(10) },
 };
 
+
+// TODO: experiment with a static framebuffer that has a &mut[u8] instead of a vec.
 
 
 /* CORE TYPE DEFINITION */
@@ -63,12 +66,14 @@ struct Editor {
     fileview:   Fileview,
 }
 
+
 struct Config {
     draw_screen:            bool,
     draw_colors:            bool,
     retain_frame:           bool,
     no_raw_mode:            bool,
 
+    debug_console:          bool,
     debug_bounds:           bool,
 
     color_default:          Colorcell,
@@ -76,6 +81,7 @@ struct Config {
     color_header_inactive:  Colorcell,
     color_footer:           Colorcell,
     color_lineno:           Colorcell,
+    color_console:          Colorcell,
 }
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
@@ -86,6 +92,8 @@ struct Vek { // Vec was already taken ...
 }
 
 // A simple rectangle
+// In general, the top-most raw and left-most column should be inclusive (min),
+// and the bottom-most raw and right-most column should be exclusive (max).
 #[derive(Debug, Clone, Copy)]
 struct Rec {
     min: Vek,   // point the closest to (0,0)
@@ -440,6 +448,11 @@ fn colorcode(c : Color) -> Colorcode {
 
 /* UTILITIES */
 
+// Because lame casting syntax
+fn usize(x: i32) -> usize {
+    x as usize
+}
+
 fn ordered<T>(v1: T, v2: T) -> (T, T) where T : Ord {
     if v1 < v2 {
         return (v1, v2)
@@ -460,8 +473,13 @@ fn fill<T>(s: &mut [T], t: T) where T : Copy {
     }
 }
 
-fn copy<T>(dst: &mut [T], src: &[T]) where T : Copy {
+fn copy_exact<T>(dst: &mut [T], src: &[T]) where T : Copy {
     dst.clone_from_slice(src)
+}
+
+fn copy<T>(dst: &mut [T], src: &[T]) where T : Copy {
+    let n = min(dst.len(), src.len());
+    copyn(dst, src, n)
 }
 
 fn copyn<T>(dst: &mut [T], src: &[T], n: usize) where T : Copy {
@@ -513,7 +531,7 @@ impl Bytebuffer {
         if c2 > dst.capacity() {
             dst.reserve(l);
         }
-        copy( &mut dst[c1..c2], src);
+        copy_exact( &mut dst[c1..c2], src);
         self.cursor = c2;
     }
 
@@ -563,11 +581,10 @@ impl Framebuffer {
         let start = (pos.y * self.window.x + pos.x) as usize;
         let stop = start + len;
 
-        copy(&mut self.text[start..stop], &src[..len]);
+        copy_exact(&mut self.text[start..stop], &src[..len]);
     }
 
     // area.min is inclusive, area.max is exclusive
-    // BUG: this crash if y1 is too big ??
     fn put_color(&mut self, area: Rec, colors: Colorcell) {
         if CONF.debug_bounds {
             assert!(0 <= area.x0());
@@ -576,12 +593,13 @@ impl Framebuffer {
             assert!(area.y1() <= self.window.y);
         }
 
-        let dx = self.window.x as usize;
-        let mut x0 = max(0, area.x0()) as usize;
-        let mut x1 = min(area.x1(), self.window.x) as usize;
-
         let y0 = max(0, area.y0());
         let y1 = min(area.y1(), self.window.y);
+
+        let dx = self.window.x as usize;
+        let xbase = dx * usize(y0);
+        let mut x0 = xbase + max(0, area.x0()) as usize;
+        let mut x1 = xbase + min(area.x1(), self.window.x) as usize;
 
         for i in y0..y1 {
             fill(&mut self.fg[x0..x1], colors.fg);
@@ -607,6 +625,12 @@ impl Framebuffer {
     fn push_frame(&mut self) {
         if !CONF.draw_screen {
             return
+        }
+
+        if CONF.debug_console {
+            unsafe {
+                CONSOLE.write_into(self);
+            }
         }
 
         self.buffer.rewind();
@@ -661,6 +685,59 @@ impl Framebuffer {
             b += 1;
         }
         b
+    }
+}
+
+
+// For the sake of simplicity, this is not wrapped into a thread_local!(RefCell::new(...)).
+static mut CONSOLE : Debugconsole = Debugconsole {
+    width:      32,
+    height:     16,
+    next_entry: 0,
+    text:       [0; 32 * 16],
+};
+
+struct Debugconsole {
+    width:      i32,
+    height:     i32,
+    next_entry: i32,
+    text:       [u8; 16 * 32],
+}
+
+impl Debugconsole {
+    fn log(msg: &str) {
+        unsafe {
+            CONSOLE.log_locked(msg);
+        }
+    }
+
+    fn get_line<'a>(&'a mut self, i: i32) -> &'a mut [u8] {
+        let src_start = usize(self.width * (i % self.height));
+        let src_stop = src_start + usize(self.width);
+        &mut self.text[src_start..src_stop]
+    }
+
+    fn log_locked(&mut self, msg: &str) {
+        let i = self.next_entry;
+        self.next_entry += 1;
+        let line = self.get_line(i);
+        fill(line, ' ' as u8);
+        copy(line, msg.as_bytes());
+    }
+
+    fn write_into(&self, framebuffer: &mut Framebuffer) {
+        let size = vek(self.width, self.height);
+        let consolearea = Rec { min: framebuffer.window - size, max: framebuffer.window };
+        let start = max(0, self.next_entry - self.height);
+        for i in start..self.next_entry {
+            let j = i % self.height;
+            let src_start = usize(self.width * j);
+            let src_stop = src_start + usize(self.width);
+            let dst_offset = consolearea.min + vek(0,j);
+            let log_len = self.width;
+            framebuffer.put_line(dst_offset, &self.text[src_start..src_stop]);
+        }
+        framebuffer.put_color(consolearea, CONF.color_console);
     }
 }
 
@@ -858,6 +935,8 @@ impl Editor {
         let p = self.framebuffer.cursor + vek(1,0);
         let l = format!("input: {:?}", c);
         self.framebuffer.put_line(p, l.as_bytes());
+
+        Debugconsole::log(&l);
 
         self.running = c != CTRL_C;
     }
