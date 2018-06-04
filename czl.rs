@@ -33,6 +33,8 @@ const CONF : Config = Config {
     debug_console:      true,
     debug_bounds:       true,
 
+    relative_lineno:    true, // BUG: itoa10 crash on negative linenos !
+
     color_default:          Colorcell { fg: Color::Black,   bg: Color::White },
     color_header_active:    Colorcell { fg: Color::Gray(2), bg: Color::Yellow },
     color_header_inactive:  Colorcell { fg: Color::Gray(2), bg: Color::Cyan },
@@ -75,6 +77,8 @@ struct Config {
 
     debug_console:          bool,
     debug_bounds:           bool,
+
+    relative_lineno:        bool,
 
     color_default:          Colorcell,
     color_header_active:    Colorcell,
@@ -448,6 +452,22 @@ fn colorcode(c : Color) -> Colorcode {
 
 /* UTILITIES */
 
+fn itoa10(dst: &mut [u8], x: i32, padding: u8) {
+    fill(dst, padding);
+    let mut y = x;
+    let mut idx = dst.len() - 1;
+    loop {
+        let b = (y % 10) as u8 + '0' as u8;
+        dst[idx] = b; 
+
+        idx -= 1;
+        y /= 10;
+        if y == 0 || idx == 0 {
+            return;
+        }
+    }
+}
+
 // Because lame casting syntax
 fn usize(x: i32) -> usize {
     x as usize
@@ -689,35 +709,35 @@ impl Framebuffer {
 }
 
 
+fn log(msg: &str) {
+    unsafe {
+        CONSOLE.log(msg);
+    }
+}
+
 // For the sake of simplicity, this is not wrapped into a thread_local!(RefCell::new(...)).
 static mut CONSOLE : Debugconsole = Debugconsole {
-    width:      32,
+    width:      48,
     height:     16,
     next_entry: 0,
-    text:       [0; 32 * 16],
+    text:       [0; 48 * 16],
 };
 
 struct Debugconsole {
     width:      i32,
     height:     i32,
     next_entry: i32,
-    text:       [u8; 16 * 32],
+    text:       [u8; 16 * 48],
 }
 
 impl Debugconsole {
-    fn log(msg: &str) {
-        unsafe {
-            CONSOLE.log_locked(msg);
-        }
-    }
-
     fn get_line<'a>(&'a mut self, i: i32) -> &'a mut [u8] {
         let src_start = usize(self.width * (i % self.height));
         let src_stop = src_start + usize(self.width);
         &mut self.text[src_start..src_stop]
     }
 
-    fn log_locked(&mut self, msg: &str) {
+    fn log(&mut self, msg: &str) {
         let i = self.next_entry;
         self.next_entry += 1;
         let line = self.get_line(i);
@@ -799,14 +819,12 @@ impl<'a> Screen<'a> {
         // lineno
         {
             // TODO: add fileoffset !
-            // TODO: add relative offset support !
-            // TODO: adjust vertical alignement to right justify
+            let mut buf = [0 as u8; 4];
             for i in 0..self.textarea.h() {
-                let lineno = (i + 1).to_string();
-                self.framebuffer.put_line(self.linenoarea.min + vek(0,i), lineno.as_bytes());
+                let lineno = if CONF.relative_lineno { i - self.framebuffer.cursor.y} else { i + 1 };
+                itoa10(&mut buf, lineno, ' ' as u8);
+                self.framebuffer.put_line(self.linenoarea.min + vek(0,i), &buf);
             }
-// TODO: more convenient way to print debug logs on the terminal !
-self.framebuffer.put_line(vek(1,1), format!("{:?}", self.linenoarea).as_bytes());
             self.framebuffer.put_color(self.linenoarea, CONF.color_lineno);
         }
     }
@@ -931,12 +949,7 @@ impl Editor {
             'l' => self.mv_cursor(Move::Right),
             _   => (),
         }
-
-        let p = self.framebuffer.cursor + vek(1,0);
-        let l = format!("input: {:?}", c);
-        self.framebuffer.put_line(p, l.as_bytes());
-
-        Debugconsole::log(&l);
+        log(&format!("input: {:?}", c));
 
         self.running = c != CTRL_C;
     }
