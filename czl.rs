@@ -29,6 +29,7 @@ const CONF : Config = Config {
     draw_screen:        true,
     draw_colors:        true,
     retain_frame:       false,
+    no_raw_mode:        false, //true,
 
     debug_bounds:       true,
 
@@ -63,11 +64,12 @@ struct Editor {
 }
 
 struct Config {
-    draw_screen: bool,
-    draw_colors: bool,
-    retain_frame:bool,
+    draw_screen:            bool,
+    draw_colors:            bool,
+    retain_frame:           bool,
+    no_raw_mode:            bool,
 
-    debug_bounds: bool,
+    debug_bounds:           bool,
 
     color_default:          Colorcell,
     color_header_active:    Colorcell,
@@ -307,7 +309,7 @@ impl Rec {
     }
 
     // TODO: should x be forbidden from matching the bounds (i.e no empty output)
-    fn vsplit(self, x: i32) -> (Rec, Rec) {
+    fn hsplit(self, x: i32) -> (Rec, Rec) {
         assert!(self.min.x <= x);
         assert!(x < self.max.x);
 
@@ -317,7 +319,7 @@ impl Rec {
         (left, right)
     }
 
-    fn hsplit(self, y: i32) -> (Rec, Rec) {
+    fn vsplit(self, y: i32) -> (Rec, Rec) {
         assert!(self.min.y <= y);
         assert!(y < self.max.y);
 
@@ -570,8 +572,8 @@ impl Framebuffer {
         if CONF.debug_bounds {
             assert!(0 <= area.x0());
             assert!(0 <= area.y0());
-            assert!(area.x1() < self.window.x);
-            assert!(area.y1() < self.window.y);
+            assert!(area.x1() <= self.window.x);
+            assert!(area.y1() <= self.window.y);
         }
 
         let dx = self.window.x as usize;
@@ -666,6 +668,7 @@ impl Framebuffer {
 impl<'a> Screen<'a> {
     fn mk_screen<'b>(window: Rec, framebuffer: &'b mut Framebuffer, fileview: &'b Fileview) -> Screen<'b> {
         let lineno_len = 5;
+        /*
         let lineno_offset = vek(lineno_len, 0);
 
         let text_min = window.min + vek(0,1);
@@ -676,6 +679,11 @@ impl<'a> Screen<'a> {
         let linenoarea  = Rec { min: text_min,                  max: max_y + lineno_offset };
         let textarea    = Rec { min: text_min + lineno_offset,  max: max_x + max_y };
         let header = window.raw(0);
+        */
+
+        let (header, filearea) = window.vsplit(1);
+        let (linenoarea, textarea) = filearea.hsplit(5);
+
         Screen {
             framebuffer,
             window,
@@ -688,13 +696,12 @@ impl<'a> Screen<'a> {
 
     fn draw(&mut self, draw: Draw, fileoffset: Vek, filebuffer: &Filebuffer) {
         // TODO: use draw and only redraw what's needed
-        // BUG: put_color crashes
 
         // header
         {
                 let header_string = format!("{}  {:?}", self.fileview.filepath, self.fileview.movement_mode);
                 self.framebuffer.put_line(self.header.min, header_string.as_bytes());
-                //self.framebuffer.put_color(self.header, CONF.color_header_active);
+                self.framebuffer.put_color(self.header, CONF.color_header_active);
         }
 
         // filebuffer content
@@ -716,11 +723,14 @@ impl<'a> Screen<'a> {
         {
             // TODO: add fileoffset !
             // TODO: add relative offset support !
+            // TODO: adjust vertical alignement to right justify
             for i in 0..self.textarea.h() {
                 let lineno = (i + 1).to_string();
                 self.framebuffer.put_line(self.linenoarea.min + vek(0,i), lineno.as_bytes());
             }
-            //self.framebuffer.put_color(self.linenoarea, CONF.color_lineno);
+// TODO: more convenient way to print debug logs on the terminal !
+self.framebuffer.put_line(vek(1,1), format!("{:?}", self.linenoarea).as_bytes());
+            self.framebuffer.put_color(self.linenoarea, CONF.color_lineno);
         }
     }
 }
@@ -950,6 +960,10 @@ impl Term {
     }
 
     fn set_raw() -> Term {
+        if CONF.no_raw_mode {
+            return Term { }
+        }
+
         let stdout = io::stdout();
         let mut h = stdout.lock();
         h.write(term_cursor_save).unwrap();
@@ -968,6 +982,10 @@ impl Term {
 
 impl Drop for Term {
     fn drop(&mut self) {
+        if CONF.no_raw_mode {
+            return
+        }
+
         let stdout = io::stdout();
         let mut h = stdout.lock();
         h.write(term_switch_mouse_tracking_off).unwrap();
