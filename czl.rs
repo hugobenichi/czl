@@ -33,7 +33,7 @@ const CONF : Config = Config {
     debug_console:      true,
     debug_bounds:       true,
 
-    relative_lineno:    true, // BUG: itoa10 crash on negative linenos !
+    relative_lineno:    true,
 
     color_default:          Colorcell { fg: Color::Black,   bg: Color::White },
     color_header_active:    Colorcell { fg: Color::Gray(2), bg: Color::Yellow },
@@ -454,17 +454,25 @@ fn colorcode(c : Color) -> Colorcode {
 
 fn itoa10(dst: &mut [u8], x: i32, padding: u8) {
     fill(dst, padding);
-    let mut y = x;
+    let mut y = x.abs();
     let mut idx = dst.len() - 1;
     loop {
         let b = (y % 10) as u8 + '0' as u8;
-        dst[idx] = b; 
+        dst[idx] = b;
 
-        idx -= 1;
         y /= 10;
-        if y == 0 || idx == 0 {
+        if y == 0 {
+            break;
+        }
+
+        if idx == 0 {
+            // overflows trap by default !
             return;
         }
+        idx -= 1;
+    }
+    if x < 0 {
+        dst[idx - 1] = '-' as u8;
     }
 }
 
@@ -647,10 +655,8 @@ impl Framebuffer {
             return
         }
 
-        if CONF.debug_console {
-            unsafe {
-                CONSOLE.write_into(self);
-            }
+        unsafe {
+            CONSOLE.write_into(self);
         }
 
         self.buffer.rewind();
@@ -710,6 +716,9 @@ impl Framebuffer {
 
 
 fn log(msg: &str) {
+    if !CONF.debug_console {
+        return
+    }
     unsafe {
         CONSOLE.log(msg);
     }
@@ -746,6 +755,9 @@ impl Debugconsole {
     }
 
     fn write_into(&self, framebuffer: &mut Framebuffer) {
+        if !CONF.debug_console {
+            return
+        }
         let size = vek(self.width, self.height);
         let consolearea = Rec { min: framebuffer.window - size, max: framebuffer.window };
         let start = max(0, self.next_entry - self.height);
@@ -820,9 +832,9 @@ impl<'a> Screen<'a> {
         {
             // TODO: add fileoffset !
             let mut buf = [0 as u8; 4];
+            let lineno_base =  if CONF.relative_lineno { - self.framebuffer.cursor.y} else { 1 };
             for i in 0..self.textarea.h() {
-                let lineno = if CONF.relative_lineno { i - self.framebuffer.cursor.y} else { i + 1 };
-                itoa10(&mut buf, lineno, ' ' as u8);
+                itoa10(&mut buf, lineno_base + i, ' ' as u8);
                 self.framebuffer.put_line(self.linenoarea.min + vek(0,i), &buf);
             }
             self.framebuffer.put_color(self.linenoarea, CONF.color_lineno);
