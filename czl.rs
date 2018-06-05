@@ -12,19 +12,22 @@ use std::str;
 use std::result;
 use std::cmp::min;
 use std::cmp::max;
-
+use std::mem::replace;
 
 /*
  * Next Steps:
- *      - handle resize
- *      - add footer bar with last input and mode
+ *      - BUG: fix the timeout=>crash in read_char()/read_inpu() !!
+ *      - add save() to Filebuffer !
+ *      - move cursor to Fileview
  *      - add text insert
  *          commands: new line, line copy, insert mode, append char
  *
  * General TODOs:
+ *  - handle resize
  *  - dir explorer
  *  - frame latency stats
  *  - cursor column and line
+ *  - command mode pending input
  */
 
 
@@ -47,7 +50,7 @@ const CONF : Config = Config {
     color_header_inactive:  Colorcell { fg: Color::Gray(2), bg: Color::Cyan },
     color_footer:           Colorcell { fg: Color::White,   bg: Color::Gray(2) },
     color_lineno:           Colorcell { fg: Color::Green,   bg: Color::Gray(2) },
-    color_console:          Colorcell { fg: Color::Red,     bg: Color::Gray(10) },
+    color_console:          Colorcell { fg: Color::White,   bg: Color::Gray(16) },
     color_mode_command:     Colorcell { fg: Color::Gray(1), bg: Color::Black },
     color_mode_insert:      Colorcell { fg: Color::Gray(1), bg: Color::Red },
 };
@@ -189,11 +192,21 @@ enum EditorMode {
     Insert,
 }
 
+const MODE_COMMAND : &'static str = "Command";
+const MODE_INSERT  : &'static str = "Insert ";
+
 impl EditorMode {
     fn footer_color(self) -> Colorcell {
         match self {
             EditorMode::Command =>  CONF.color_mode_command,
             EditorMode::Insert  =>  CONF.color_mode_insert,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            EditorMode::Command =>  MODE_COMMAND,
+            EditorMode::Insert  =>  MODE_INSERT,
         }
     }
 }
@@ -243,6 +256,7 @@ struct Textbuffer {
     lines:  Vec<Line>,  // subslices into the filebuffer or appendbuffer
 }
 
+#[derive(Clone)]
 struct Textsnapshot {
     line_indexes: Vec<usize> // the actual lines in the current files, as indexes into 'lines'
 }
@@ -932,6 +946,27 @@ impl Filebuffer {
         let line = self.textbuffer.lines[line_idx].to_slice(&self.textbuffer.text);
         shift(line, x)
     }
+}
+
+
+// Filebuffer ops
+impl Filebuffer {
+
+    fn line_del(&mut self, y: usize) {
+        assert!(y < self.current_snapshot.line_indexes.len());
+
+        let next_snapshot = self.current_snapshot.clone();
+        let prev_snapshot = replace(&mut self.current_snapshot, next_snapshot);
+        self.previous_snapshots.push(prev_snapshot);
+        self.current_snapshot.line_indexes.remove(y);
+    }
+
+    fn undo(&mut self) {
+        match self.previous_snapshots.pop() {
+            Some(prev_snapshot) => self.current_snapshot = prev_snapshot,
+            None => (),
+        }
+    }
 
     fn append(&mut self, c: u8) {
         // TODO
@@ -977,7 +1012,8 @@ impl Editor {
         }
 
         {
-            self.framebuffer.put_line(self.footer.min, b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
+            self.framebuffer.put_line(self.footer.min + vek(1,0), self.mode.name().as_bytes());
+            self.framebuffer.put_line(self.footer.min + vek(10, 0), b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
             self.framebuffer.put_color(self.footer, self.mode.footer_color());
         }
 
@@ -1002,6 +1038,8 @@ impl Editor {
             'l'     => self.mv_cursor(Move::Right),
             '\t'    => self.switch_mode(),
             '\\'    => Debugconsole::clear(),
+            'd'     => self.filebuffer.line_del((self.framebuffer.cursor.y - 1) /* because not text coordinate */ as usize),
+            'u'     => self.filebuffer.undo(),
 
             // noop by default
             _       => (),
