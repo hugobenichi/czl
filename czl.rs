@@ -20,6 +20,11 @@ use std::cmp::max;
  *      - add footer bar with last input and mode
  *      - add text insert
  *          commands: new line, line copy, insert mode, append char
+ *
+ * General TODOs:
+ *  - dir explorer
+ *  - frame latency stats
+ *  - cursor column and line
  */
 
 
@@ -34,6 +39,8 @@ const CONF : Config = Config {
     debug_bounds:       true,
 
     relative_lineno:    true,
+    cursor_show_line:   true,
+    cursor_show_column: true,
 
     color_default:          Colorcell { fg: Color::Black,   bg: Color::White },
     color_header_active:    Colorcell { fg: Color::Gray(2), bg: Color::Yellow },
@@ -41,6 +48,8 @@ const CONF : Config = Config {
     color_footer:           Colorcell { fg: Color::White,   bg: Color::Gray(2) },
     color_lineno:           Colorcell { fg: Color::Green,   bg: Color::Gray(2) },
     color_console:          Colorcell { fg: Color::Red,     bg: Color::Gray(10) },
+    color_mode_command:     Colorcell { fg: Color::Gray(1), bg: Color::Black },
+    color_mode_insert:      Colorcell { fg: Color::Gray(1), bg: Color::Red },
 };
 
 
@@ -53,8 +62,10 @@ const CONF : Config = Config {
 struct Editor {
     window:         Vek,              // The dimensions of the editor and backend terminal window
     mainscreen:     Rec,              // The screen area for displaying file content and menus.
-    footer:         Vek,
+    footer:         Rec,
     framebuffer:    Framebuffer,
+
+    mode:           EditorMode,
 
     running: bool,
     // TODO:
@@ -79,6 +90,8 @@ struct Config {
     debug_bounds:           bool,
 
     relative_lineno:        bool,
+    cursor_show_line:       bool,
+    cursor_show_column:     bool,
 
     color_default:          Colorcell,
     color_header_active:    Colorcell,
@@ -86,6 +99,8 @@ struct Config {
     color_footer:           Colorcell,
     color_lineno:           Colorcell,
     color_console:          Colorcell,
+    color_mode_command:     Colorcell,
+    color_mode_insert:      Colorcell,
 }
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
@@ -166,6 +181,21 @@ enum MovementMode {
     Braces,
     Selection,
     Pages,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EditorMode {
+    Command,
+    Insert,
+}
+
+impl EditorMode {
+    fn footer_color(self) -> Colorcell {
+        match self {
+            EditorMode::Command =>  CONF.color_mode_command,
+            EditorMode::Insert  =>  CONF.color_mode_insert,
+        }
+    }
 }
 
 // The struct that manages compositing.
@@ -308,15 +338,15 @@ impl Rec {
     fn area(self) -> i32 { self.w() * self.h() }
     fn size(self) -> Vek { vek(self.w(), self.h()) }
 
-    fn raw(self, y: i32) -> Rec {
+    fn row(self, y: i32) -> Rec {
         assert!(self.min.y <= y);
-        assert!(y < self.max.y);
+        assert!(y <= self.max.y);
         rec(self.min.x, y, self.max.x, y + 1)
     }
 
     fn column(self, x: i32) -> Rec {
         assert!(self.min.x <= x);
-        assert!(x < self.max.x);
+        assert!(x <= self.max.x);
         rec(x, self.min.y, x + 1, self.max.y)
     }
 
@@ -777,21 +807,8 @@ impl Debugconsole {
 impl<'a> Screen<'a> {
     fn mk_screen<'b>(window: Rec, framebuffer: &'b mut Framebuffer, fileview: &'b Fileview) -> Screen<'b> {
         let lineno_len = 5;
-        /*
-        let lineno_offset = vek(lineno_len, 0);
-
-        let text_min = window.min + vek(0,1);
-        let max_y = vek(0, window.max.y);
-        let max_x = vek(window.max.x, 0);
-
-        // TODO: use vsplit & hsplit !
-        let linenoarea  = Rec { min: text_min,                  max: max_y + lineno_offset };
-        let textarea    = Rec { min: text_min + lineno_offset,  max: max_x + max_y };
-        let header = window.raw(0);
-        */
-
         let (header, filearea) = window.vsplit(1);
-        let (linenoarea, textarea) = filearea.hsplit(5);
+        let (linenoarea, textarea) = filearea.hsplit(lineno_len);
 
         Screen {
             framebuffer,
@@ -839,6 +856,8 @@ impl<'a> Screen<'a> {
             }
             self.framebuffer.put_color(self.linenoarea, CONF.color_lineno);
         }
+
+        // TODO: cursor line and column, this requires tracking cursor info in Fileview
     }
 }
 
@@ -908,15 +927,16 @@ impl Editor {
         let window = Term::size();
         let framebuffer = Framebuffer::mk_framebuffer(window);
         let running = true;
-        let footer = vek(0, window.y - 1);
-        let mainscreen = vek(window.x, window.y - 1).rec();
+        let (mainscreen, footer) = window.rec().vsplit(window.y - 1);
         let fileview = Fileview::default(filename);
+        let mode = EditorMode::Command;
 
         Editor {
             window,
             mainscreen,
             footer,
             framebuffer,
+            mode,
             running,
             filebuffer,
             fileview,
@@ -939,7 +959,8 @@ impl Editor {
         }
 
         {
-            self.framebuffer.put_line(self.footer, b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
+            self.framebuffer.put_line(self.footer.min, b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
+            self.framebuffer.put_color(self.footer, self.mode.footer_color());
         }
 
         {
@@ -955,11 +976,13 @@ impl Editor {
 
         // TODO: more sophisticated cursor movement ...
         match c {
-            'h' => self.mv_cursor(Move::Left),
-            'j' => self.mv_cursor(Move::Down),
-            'k' => self.mv_cursor(Move::Up),
-            'l' => self.mv_cursor(Move::Right),
-            _   => (),
+            'h'     => self.mv_cursor(Move::Left),
+            'j'     => self.mv_cursor(Move::Down),
+            'k'     => self.mv_cursor(Move::Up),
+            'l'     => self.mv_cursor(Move::Right),
+            '\t'    => self.switch_mode(),
+            // noop by default
+            _       => (),
         }
         log(&format!("input: {:?}", c));
 
@@ -976,6 +999,14 @@ impl Editor {
             _           => (),
         }
         self.framebuffer.set_cursor(p);
+    }
+
+    fn switch_mode(&mut self) {
+        let newmode = match self.mode {
+            EditorMode::Command =>  EditorMode::Insert,
+            EditorMode::Insert  =>  EditorMode::Command,
+        };
+        self.mode = newmode;
     }
 
     fn resize(&mut self) {
