@@ -384,6 +384,13 @@ impl Vek {
             max: self,
         }
     }
+
+    fn extrude(self, diag: Vek) -> Rec {
+        Rec {
+            min: self,
+            max: self + diag,
+        }
+    }
 }
 
 impl std::ops::Add<Vek> for Vek {
@@ -770,7 +777,19 @@ struct Debugconsole {
 }
 
 impl Debugconsole {
-    fn get_line<'a>(&'a mut self, i: i32) -> &'a mut [u8] {
+    fn clear() {
+        unsafe {
+            CONSOLE.next_entry = 0;
+        }
+    }
+
+    fn get_line<'a>(&'a self, i: i32) -> &'a [u8] {
+        let src_start = usize(self.width * (i % self.height));
+        let src_stop = src_start + usize(self.width);
+        &self.text[src_start..src_stop]
+    }
+
+    fn get_line_mut<'a>(&'a mut self, i: i32) -> &'a mut [u8] {
         let src_start = usize(self.width * (i % self.height));
         let src_stop = src_start + usize(self.width);
         &mut self.text[src_start..src_stop]
@@ -779,7 +798,7 @@ impl Debugconsole {
     fn log(&mut self, msg: &str) {
         let i = self.next_entry;
         self.next_entry += 1;
-        let line = self.get_line(i);
+        let line = self.get_line_mut(i);
         fill(line, ' ' as u8);
         copy(line, msg.as_bytes());
     }
@@ -788,16 +807,15 @@ impl Debugconsole {
         if !CONF.debug_console {
             return
         }
-        let size = vek(self.width, self.height);
-        let consolearea = Rec { min: framebuffer.window - size, max: framebuffer.window };
+
+        let size = vek(self.width, min(self.next_entry, self.height));
+        let consoleoffset = - vek(0,1); // don't overwrite the footer.
+        let consolearea = Rec { min: framebuffer.window - size, max: framebuffer.window } + consoleoffset;
+
         let start = max(0, self.next_entry - self.height);
         for i in start..self.next_entry {
-            let j = i % self.height;
-            let src_start = usize(self.width * j);
-            let src_stop = src_start + usize(self.width);
-            let dst_offset = consolearea.min + vek(0,j);
-            let log_len = self.width;
-            framebuffer.put_line(dst_offset, &self.text[src_start..src_stop]);
+            let dst_offset = consolearea.max - vek(self.width, self.next_entry - i);
+            framebuffer.put_line(dst_offset, self.get_line(i));
         }
         framebuffer.put_color(consolearea, CONF.color_console);
     }
@@ -974,6 +992,8 @@ impl Editor {
     fn process_input(&mut self) {
         let c = read_char();
 
+        log(&format!("input: {:?}", c));
+
         // TODO: more sophisticated cursor movement ...
         match c {
             'h'     => self.mv_cursor(Move::Left),
@@ -981,10 +1001,11 @@ impl Editor {
             'k'     => self.mv_cursor(Move::Up),
             'l'     => self.mv_cursor(Move::Right),
             '\t'    => self.switch_mode(),
+            '\\'    => Debugconsole::clear(),
+
             // noop by default
             _       => (),
         }
-        log(&format!("input: {:?}", c));
 
         self.running = c != CTRL_C;
     }
