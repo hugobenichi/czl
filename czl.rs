@@ -16,9 +16,9 @@ use std::mem::replace;
 
 /*
  * Next Steps:
+ *      - implement fileview dragging for cursor movement !
  *      - BUG: fix the timeout=>crash in read_char()/read_inpu() !!
  *      - add save() to Filebuffer !
- *      - move cursor to Fileview
  *      - add text insert
  *          commands: new line, line copy, insert mode, append char
  *
@@ -26,7 +26,6 @@ use std::mem::replace;
  *  - handle resize
  *  - dir explorer
  *  - frame latency stats
- *  - cursor column and line
  *  - command mode pending input
  */
 
@@ -53,6 +52,7 @@ const CONF : Config = Config {
     color_console:          Colorcell { fg: Color::White,   bg: Color::Gray(16) },
     color_mode_command:     Colorcell { fg: Color::Gray(1), bg: Color::Black },
     color_mode_insert:      Colorcell { fg: Color::Gray(1), bg: Color::Red },
+    color_cursor_lines:     Colorcell { fg: Color::Black,   bg: Color::Gray(6) },
 };
 
 
@@ -104,6 +104,7 @@ struct Config {
     color_console:          Colorcell,
     color_mode_command:     Colorcell,
     color_mode_insert:      Colorcell,
+    color_cursor_lines:     Colorcell,
 }
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
@@ -300,7 +301,7 @@ struct Fileview {
     show_neighbor:      bool,
     show_selection:     bool,
     is_active:          bool,
-    //cursor:
+    cursor:             Vek,
     //selection:  Option<&[Selection]>
 }
 
@@ -314,6 +315,7 @@ impl Fileview {
             show_neighbor:      false,
             show_selection:     false,
             is_active:          true,
+            cursor:             vek(0,0),
         }
     }
 }
@@ -854,6 +856,7 @@ impl<'a> Screen<'a> {
 
     fn draw(&mut self, draw: Draw, fileoffset: Vek, filebuffer: &Filebuffer) {
         // TODO: use draw and only redraw what's needed
+        // TODO: automatize the screen coordinate offsetting for framebuffer commands
 
         // header
         {
@@ -866,7 +869,6 @@ impl<'a> Screen<'a> {
         {
             let y_stop = min(self.textarea.h(), filebuffer.nlines() - fileoffset.y);
             for i in 0..y_stop {
-
                 let lineoffset = vek(0, i);
                 let text_offset = fileoffset + lineoffset;
                 let frame_offset = self.textarea.min + lineoffset;
@@ -889,7 +891,15 @@ impl<'a> Screen<'a> {
             self.framebuffer.put_color(self.linenoarea, CONF.color_lineno);
         }
 
-        // TODO: cursor line and column, this requires tracking cursor info in Fileview
+        {
+            let cursor_screen_position = self.fileview.cursor + self.textarea.min - fileoffset;
+            if self.fileview.is_active {
+                self.framebuffer.set_cursor(cursor_screen_position);
+            }
+
+            self.framebuffer.put_color(self.textarea.row(cursor_screen_position.y), CONF.color_cursor_lines);
+            self.framebuffer.put_color(self.textarea.column(cursor_screen_position.x), CONF.color_cursor_lines);
+        }
     }
 }
 
@@ -897,6 +907,10 @@ impl<'a> Screen<'a> {
 impl Line {
     fn to_slice<'a>(self, text: &'a[u8]) -> &'a[u8] {
         &text[self.start..self.stop]
+    }
+
+    fn len(self) -> usize {
+        self.stop - self.start // BUG: not utf8 aware ! no tab aware !
     }
 }
 
@@ -937,6 +951,11 @@ impl Filebuffer {
 
     fn nlines(&self) -> i32 {
         self.current_snapshot.line_indexes.len() as i32
+    }
+
+    fn line_len(&self, y: usize) -> usize {
+        let idx = self.current_snapshot.line_indexes[y as usize];
+        self.textbuffer.lines[idx].len()
     }
 
     fn get_line<'a>(&'a self, offset: Vek) -> &'a[u8] {
@@ -1049,7 +1068,7 @@ impl Editor {
     }
 
     fn mv_cursor(&mut self, m : Move) {
-        let mut p = self.framebuffer.cursor;
+        let mut p = self.fileview.cursor;
         match m {
             Move::Left  => p = p + vek(-1,0),
             Move::Right => p = p + vek(1,0),
@@ -1057,7 +1076,13 @@ impl Editor {
             Move::Down  => p = p + vek(0,1),
             _           => (),
         }
-        self.framebuffer.set_cursor(p);
+        p.x = max(0, p.x);
+        p.y = max(0, p.y);
+
+        p.y = min(p.y, self.filebuffer.nlines());
+        p.x = min(p.x, self.filebuffer.line_len(p.y as usize) as i32);
+
+        self.fileview.cursor = p;
     }
 
     fn switch_mode(&mut self) {
