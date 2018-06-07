@@ -20,7 +20,6 @@ use std::mem::replace;
 /*
  * Next Steps:
  *      - implement fileview dragging for cursor movement !
- *      - BUG: fix the timeout=>crash in read_char()/read_inpu() !!
  *      - add save() to Filebuffer !
  *      - add text insert
  *          commands: new line, line copy, insert mode, append char
@@ -1097,20 +1096,22 @@ impl Editor {
     }
 
     fn process_input(&mut self) {
-        let c = read_char();
+        let c = read_input();
 
         log(&format!("input: {:?}", c));
 
         // TODO: more sophisticated cursor movement ...
         match c {
-            'h'     => self.mv_cursor(Move::Left),
-            'j'     => self.mv_cursor(Move::Down),
-            'k'     => self.mv_cursor(Move::Up),
-            'l'     => self.mv_cursor(Move::Right),
-            '\t'    => self.switch_mode(),
-            '\\'    => Debugconsole::clear(),
-            'd'     => self.filebuffer.line_del((self.framebuffer.cursor.y - 1) /* because not text coordinate */ as usize),
-            'u'     => self.filebuffer.undo(),
+            Input::Key('h')    => self.mv_cursor(Move::Left),
+            Input::Key('j')    => self.mv_cursor(Move::Down),
+            Input::Key('k')    => self.mv_cursor(Move::Up),
+            Input::Key('l')    => self.mv_cursor(Move::Right),
+            Input::Key('\t')   => self.switch_mode(),
+            Input::Key('\\')   => Debugconsole::clear(),
+            Input::Key('d')    => self.filebuffer.line_del((self.framebuffer.cursor.y - 1) /* because not text coordinate */ as usize),
+            Input::Key('u')    => self.filebuffer.undo(),
+
+            Input::Key(CTRL_C) => self.running = false,
 
             // noop by default
             _       => (),
@@ -1119,8 +1120,6 @@ impl Editor {
         // TODO: update the fileview here regardless of the operation !
         //  for instance delete line can force a cursor update
         self.fileview.update(&self.filebuffer);
-
-        self.running = c != CTRL_C;
     }
 
     fn mv_cursor(&mut self, m : Move) {
@@ -1331,11 +1330,16 @@ fn is_printable(c : char) -> bool {
 fn read_char() -> char {
     let mut stdin = io::stdin();
     let mut buf = [0;1];
-    // TODO: handle timeouts when nread == 0 by looping
     // TODO: handle interrupts when errno == EINTR
     // TODO: propagate error otherwise
     // TODO: support unicode !
-    stdin.read_exact(&mut buf).unwrap();
+    loop {
+        let n = stdin.read(&mut buf).unwrap();
+        if n == 1 {
+            break;
+        }
+        // otherwise, it's a timeout => retry
+    }
 
     buf[0] as char
 }
@@ -1350,6 +1354,7 @@ fn read_input() -> Input {
     // Escape sequence
     assert_eq!(read_char(), '[');
 
+    // BUG: mouse clicks are not correctly parsed
     match read_char() {
         'M' =>  (), // Mouse click, handled below
         'Z' =>  return Input::EscZ,
