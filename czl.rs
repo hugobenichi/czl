@@ -14,6 +14,9 @@ use std::cmp::min;
 use std::cmp::max;
 use std::mem::replace;
 
+// FIXME bug with fileno offset when scrolling up ??
+// FIXME bug with cursor and delete position not in sync !!
+
 /*
  * Next Steps:
  *      - implement fileview dragging for cursor movement !
@@ -27,6 +30,9 @@ use std::mem::replace;
  *  - dir explorer
  *  - frame latency stats
  *  - command mode pending input
+ *  - think more about where to track the screen area:
+ *      right now it is repeated both in Screen and in Fileview
+ *      ideally Screen would not be tracking it
  */
 
 
@@ -302,21 +308,57 @@ struct Fileview {
     show_selection:     bool,
     is_active:          bool,
     cursor:             Vek,
+    filearea:           Rec,
     //selection:  Option<&[Selection]>
 }
 
 impl Fileview {
-    fn default(filepath: String) -> Fileview {
+    fn mk_fileview(filepath: String, screensize: Vek) -> Fileview {
         Fileview {
             filepath,
-            relative_lineno:    false,
+            relative_lineno:    CONF.relative_lineno,
             movement_mode:      MovementMode::Chars,
             show_token:         false,
             show_neighbor:      false,
             show_selection:     false,
             is_active:          true,
             cursor:             vek(0,0),
+            filearea:           screensize.rec(),
         }
+    }
+
+    fn update(&mut self, filebuffer: &Filebuffer) {
+        // TODO: this should track a 'desired cursor position' and take this into
+        // account when adjusting the real cursor position.
+        let mut p = self.cursor;
+
+        p.y = min(p.y, filebuffer.nlines() - 1);
+        p.y = max(0, p.y);
+
+        // Right bound clamp pushes x to -1 for empty lines.
+        p.x = min(p.x, filebuffer.line_len(p.y as usize) as i32 - 1);
+        p.x = max(0, p.x);
+
+        self.cursor = p;
+
+        let mut dx = 0;
+        let mut dy = 0;
+
+        if p.y < self.filearea.min.y {
+            dy = p.y - self.filearea.min.y;
+        }
+        if self.filearea.max.y <= p.y {
+            dy = p.y + 1 - self.filearea.max.y;
+        }
+        if p.x < self.filearea.min.x {
+            dx = p.x - self.filearea.min.x;
+        }
+        if self.filearea.max.x <= p.x {
+            dx = p.x + 1 - self.filearea.max.x;
+        }
+
+        self.filearea = self.filearea + vek(dx, dy);
+        // TODO: add horizontal scrolling !
     }
 }
 
@@ -854,9 +896,10 @@ impl<'a> Screen<'a> {
         }
     }
 
-    fn draw(&mut self, draw: Draw, fileoffset: Vek, filebuffer: &Filebuffer) {
+    fn draw(&mut self, draw: Draw, filebuffer: &Filebuffer) {
         // TODO: use draw and only redraw what's needed
         // TODO: automatize the screen coordinate offsetting for framebuffer commands
+        let fileoffset = self.fileview.filearea.min;
 
         // header
         {
@@ -883,7 +926,11 @@ impl<'a> Screen<'a> {
         {
             // TODO: add fileoffset !
             let mut buf = [0 as u8; 4];
-            let lineno_base =  if CONF.relative_lineno { - self.framebuffer.cursor.y} else { 1 };
+            let lineno_base = if self.fileview.relative_lineno {
+                -self.framebuffer.cursor.y
+            } else {
+                fileoffset.y + 1
+            };
             for i in 0..self.textarea.h() {
                 itoa10(&mut buf, lineno_base + i, ' ' as u8);
                 self.framebuffer.put_line(self.linenoarea.min + vek(0,i), &buf);
@@ -1000,7 +1047,13 @@ impl Editor {
         let framebuffer = Framebuffer::mk_framebuffer(window);
         let running = true;
         let (mainscreen, footer) = window.rec().vsplit(window.y - 1);
-        let fileview = Fileview::default(filename);
+        let fileview;
+        {
+            // reuse code in mk_Screen !!!
+            let (_, filearea) = mainscreen.vsplit(1);
+            let (_, textarea) = filearea.hsplit(5);
+            fileview = Fileview::mk_fileview(filename, textarea.size());
+        }
         let mode = EditorMode::Command;
 
         Editor {
@@ -1026,8 +1079,7 @@ impl Editor {
         {
             let mut screen = Screen::mk_screen(self.mainscreen, &mut self.framebuffer, &self.fileview);
 
-            let cursor = vek(0,0);
-            screen.draw(Draw::All, cursor, &self.filebuffer);
+            screen.draw(Draw::All, &self.filebuffer);
         }
 
         {
@@ -1064,25 +1116,24 @@ impl Editor {
             _       => (),
         }
 
+        // TODO: update the fileview here regardless of the operation !
+        //  for instance delete line can force a cursor update
+        self.fileview.update(&self.filebuffer);
+
         self.running = c != CTRL_C;
     }
 
     fn mv_cursor(&mut self, m : Move) {
-        let mut p = self.fileview.cursor;
-        match m {
-            Move::Left  => p = p + vek(-1,0),
-            Move::Right => p = p + vek(1,0),
-            Move::Up    => p = p + vek(0,-1),
-            Move::Down  => p = p + vek(0,1),
-            _           => (),
-        }
-        p.x = max(0, p.x);
-        p.y = max(0, p.y);
+        let delta = match m {
+            Move::Left  => vek(-1,0),
+            Move::Right => vek(1,0),
+            Move::Up    => vek(0,-1),
+            Move::Down  => vek(0,1),
+            _           => vek(0,0),
+        };
 
-        p.y = min(p.y, self.filebuffer.nlines());
-        p.x = min(p.x, self.filebuffer.line_len(p.y as usize) as i32);
-
-        self.fileview.cursor = p;
+        // TODO: update the 'desired cursor position' instead of the real cursor position
+        self.fileview.cursor = self.fileview.cursor + delta;
     }
 
     fn switch_mode(&mut self) {
