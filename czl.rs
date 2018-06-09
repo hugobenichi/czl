@@ -5,6 +5,7 @@
 
 
 
+use std::fmt;
 use std::fs;
 use std::io;
 use std::io::prelude::*;
@@ -14,11 +15,10 @@ use std::cmp::min;
 use std::cmp::max;
 use std::mem::replace;
 
-// FIXME bug with fileno offset when scrolling up ??
-// FIXME bug with cursor and delete position not in sync !!
 
 /*
  * Next Steps:
+ *  - cursor horizontal memory
  *  - add text insert
  *      commands: new line, line copy, insert mode, append char
  *
@@ -226,7 +226,7 @@ struct Framebuffer {
                 // for color -> u8 -> control string conversions
     fg:         Vec<Color>,
     bg:         Vec<Color>,
-    cursor:     Vek,
+    cursor:     Vek,            // Absolute screen coordinate relative to (0,0).
 
     buffer:     Bytebuffer,
 }
@@ -238,6 +238,7 @@ struct Bytebuffer {
 }
 
 // Transient object for putting text into a subrectangle of a framebuffer.
+// All positions are w.r.t the Framebuffer (0,0) origin.
 // Since it needs a mut ref to the framebuffer, Screen objs cannot be stored.
 struct Screen<'a> {
     framebuffer:    &'a mut Framebuffer,
@@ -297,6 +298,7 @@ struct Cursor<'a> {
 }
 
 // Store states related to navigation in a given file.
+// All positions are in text coordinate.
 struct Fileview {
     filepath:           String,
     relative_lineno:    bool,
@@ -446,6 +448,12 @@ impl Vek {
             min: self,
             max: self + diag,
         }
+    }
+}
+
+impl fmt::Display for Vek {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "({}, {})", self.x, self.y)
     }
 }
 
@@ -897,7 +905,11 @@ impl<'a> Screen<'a> {
     fn draw(&mut self, draw: Draw, filebuffer: &Filebuffer) {
         // TODO: use draw and only redraw what's needed
         // TODO: automatize the screen coordinate offsetting for framebuffer commands
-        let fileoffset = self.fileview.filearea.min;
+        let file_base_offset = self.fileview.filearea.min;
+        let frame_base_offset = self.textarea.min;
+
+//log(&format!("fileoffset: {}", file_base_offset));
+//log(&format!("textoffset: {}", frame_base_offset));
 
         // header
         {
@@ -908,13 +920,13 @@ impl<'a> Screen<'a> {
 
         // filebuffer content
         {
-            let y_stop = min(self.textarea.h(), filebuffer.nlines() - fileoffset.y);
+            let y_stop = min(self.textarea.h(), filebuffer.nlines() - file_base_offset.y);
             for i in 0..y_stop {
                 let lineoffset = vek(0, i);
-                let text_offset = fileoffset + lineoffset;
-                let frame_offset = self.textarea.min + lineoffset;
+                let file_offset = file_base_offset + lineoffset;
+                let frame_offset = frame_base_offset + lineoffset;
 
-                let mut line = filebuffer.get_line(text_offset);
+                let mut line = filebuffer.get_line(file_offset);
                 line = clamp(line, self.textarea.w() as usize);
                 self.framebuffer.put_line(frame_offset, line);
             }
@@ -922,12 +934,11 @@ impl<'a> Screen<'a> {
 
         // lineno
         {
-            // TODO: add fileoffset !
             let mut buf = [0 as u8; 4];
             let lineno_base = if self.fileview.relative_lineno {
-                -self.framebuffer.cursor.y
+                file_base_offset.y - self.fileview.cursor.y
             } else {
-                fileoffset.y + 1
+                file_base_offset.y + 1
             };
             for i in 0..self.textarea.h() {
                 itoa10(&mut buf, lineno_base + i, ' ' as u8);
@@ -937,13 +948,15 @@ impl<'a> Screen<'a> {
         }
 
         {
-            let cursor_screen_position = self.fileview.cursor + self.textarea.min - fileoffset;
+            let cursor_screen_position = self.fileview.cursor + self.textarea.min - file_base_offset;
             if self.fileview.is_active {
                 self.framebuffer.set_cursor(cursor_screen_position);
             }
 
             self.framebuffer.put_color(self.textarea.row(cursor_screen_position.y), CONF.color_cursor_lines);
             self.framebuffer.put_color(self.textarea.column(cursor_screen_position.x), CONF.color_cursor_lines);
+
+//log(&format!("screen cursor: {}", cursor_screen_position));
         }
     }
 }
@@ -1096,14 +1109,14 @@ impl Editor {
             self.framebuffer.put_color(self.footer, self.mode.footer_color());
         }
 
+//log(&format!("file cursor: {}", self.fileview.cursor));
+
         {
             self.framebuffer.push_frame();
             if !CONF.retain_frame {
                 self.framebuffer.clear();
             }
         }
-
-        log(&format!("cursor: {:?}", self.fileview.cursor));
     }
 
     fn process_input(&mut self) {
@@ -1119,7 +1132,7 @@ impl Editor {
             Input::Key('l')    => self.mv_cursor(Move::Right),
             Input::Key('\t')   => self.switch_mode(),
             Input::Key('\\')   => Debugconsole::clear(),
-            Input::Key('d')    => self.filebuffer.line_del((self.framebuffer.cursor.y - 1) /* because not text coordinate */ as usize),
+            Input::Key('d')    => self.filebuffer.line_del(usize(self.fileview.cursor.y)),
             Input::Key('u')    => self.filebuffer.undo(),
             Input::Key('s')    => self.filebuffer.to_file(&format!("{}.tmp", self.fileview.filepath)),
 
