@@ -19,10 +19,8 @@ use std::mem::replace;
 
 /*
  * Next Steps:
- *      - implement fileview dragging for cursor movement !
- *      - add save() to Filebuffer !
- *      - add text insert
- *          commands: new line, line copy, insert mode, append char
+ *  - add text insert
+ *      commands: new line, line copy, insert mode, append char
  *
  * General TODOs:
  *  - handle resize
@@ -32,22 +30,23 @@ use std::mem::replace;
  *  - think more about where to track the screen area:
  *      right now it is repeated both in Screen and in Fileview
  *      ideally Screen would not be tracking it
+ *  - systematically propagate errors everywhere
  */
 
 
 // Global constant that controls a bunch of options.
 const CONF : Config = Config {
-    draw_screen:        true,
-    draw_colors:        true,
-    retain_frame:       false,
-    no_raw_mode:        false, //true,
+    draw_screen:            true,
+    draw_colors:            true,
+    retain_frame:           false,
+    no_raw_mode:            false, //true,
 
-    debug_console:      true,
-    debug_bounds:       true,
+    debug_console:          true,
+    debug_bounds:           true,
 
-    relative_lineno:    true,
-    cursor_show_line:   true,
-    cursor_show_column: true,
+    relative_lineno:        true,
+    cursor_show_line:       true,
+    cursor_show_column:     true,
 
     color_default:          Colorcell { fg: Color::Black,   bg: Color::White },
     color_header_active:    Colorcell { fg: Color::Gray(2), bg: Color::Yellow },
@@ -995,6 +994,16 @@ impl Filebuffer {
         }
     }
 
+    // TODO: propagate errors
+    fn to_file(&self, path: &str) {
+        let mut f = fs::File::create(path).unwrap();
+
+        for i in 0..self.nlines() {
+            f.write_all(self.get_line(vek(0,i))).unwrap();
+            f.write_all(b"\n").unwrap(); // TODO: use platform's newline
+        }
+    }
+
     fn nlines(&self) -> i32 {
         self.current_snapshot.line_indexes.len() as i32
     }
@@ -1093,6 +1102,8 @@ impl Editor {
                 self.framebuffer.clear();
             }
         }
+
+        log(&format!("cursor: {:?}", self.fileview.cursor));
     }
 
     fn process_input(&mut self) {
@@ -1110,6 +1121,7 @@ impl Editor {
             Input::Key('\\')   => Debugconsole::clear(),
             Input::Key('d')    => self.filebuffer.line_del((self.framebuffer.cursor.y - 1) /* because not text coordinate */ as usize),
             Input::Key('u')    => self.filebuffer.undo(),
+            Input::Key('s')    => self.filebuffer.to_file(&format!("{}.tmp", self.fileview.filepath)),
 
             Input::Key(CTRL_C) => self.running = false,
 

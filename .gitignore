@@ -1,4 +1,5 @@
 czl
+*.tmp
 build/
 
 tags
