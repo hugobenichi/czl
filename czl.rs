@@ -28,7 +28,7 @@ use std::mem::replace;
  *  - frame latency stats
  *  - command mode pending input
  *  - think more about where to track the screen area:
- *      right now it is repeated both in Screen and in Fileview
+ *      right now it is repeated both in Screen and in View
  *      ideally Screen would not be tracking it
  *  - systematically propagate errors everywhere
  */
@@ -82,8 +82,8 @@ struct Editor {
     //  Mode state machine
 
     // For the time being, only one file can be loaded and edited per program.
-    filebuffer: Filebuffer,
-    fileview:   Fileview,
+    buffer: Buffer,
+    view:   View,
 }
 
 
@@ -246,8 +246,8 @@ struct Screen<'a> {
     linenoarea:     Rec,
     textarea:       Rec,
     header:         Rec,
-    fileview:       &'a Fileview,
-    // TODO: consider adding Filebuffer directly here too
+    view:       &'a View,
+    // TODO: consider adding Buffer directly here too
 }
 
 enum Draw {
@@ -259,7 +259,7 @@ enum Draw {
 
 struct Textbuffer {
     text:   Vec<u8>,    // original content of the file when loaded
-    lines:  Vec<Line>,  // subslices into the filebuffer or appendbuffer
+    lines:  Vec<Line>,  // subslices into the buffer or appendbuffer
 }
 
 #[derive(Clone)]
@@ -270,13 +270,13 @@ struct Textsnapshot {
 // Manage content of a file
 // Q: can I have a vec in a struct and another subslice pointing into that vec ?
 //    I would need to say that they both have the same lifetime as the struct.
-struct Filebuffer {
+struct Buffer {
     textbuffer: Textbuffer,
     previous_snapshots: Vec<Textsnapshot>,
     current_snapshot: Textsnapshot,
 }
 
-// A pair of offsets into a filebuffer for delimiting lines.
+// A pair of offsets into a buffer for delimiting lines.
 #[derive(Debug, Clone, Copy)]
 struct Line {
     start:  usize,      // inclusive
@@ -292,14 +292,14 @@ struct Linerange {
     stop:   usize,
 }
 
-// Point to a place inside a Filebuffer
+// Point to a place inside a Buffer
 struct Cursor<'a> {
-    filebuffer: &'a Filebuffer,
+    buffer: &'a Buffer,
 }
 
 // Store states related to navigation in a given file.
 // All positions are in text coordinate.
-struct Fileview {
+struct View {
     filepath:           String,
     relative_lineno:    bool,
     movement_mode:      MovementMode,
@@ -312,9 +312,9 @@ struct Fileview {
     //selection:  Option<&[Selection]>
 }
 
-impl Fileview {
-    fn mk_fileview(filepath: String, screensize: Vek) -> Fileview {
-        Fileview {
+impl View {
+    fn mk_fileview(filepath: String, screensize: Vek) -> View {
+        View {
             filepath,
             relative_lineno:    CONF.relative_lineno,
             movement_mode:      MovementMode::Chars,
@@ -327,16 +327,16 @@ impl Fileview {
         }
     }
 
-    fn update(&mut self, filebuffer: &Filebuffer) {
+    fn update(&mut self, buffer: &Buffer) {
         // TODO: this should track a 'desired cursor position' and take this into
         // account when adjusting the real cursor position.
         let mut p = self.cursor;
 
-        p.y = min(p.y, filebuffer.nlines() - 1);
+        p.y = min(p.y, buffer.nlines() - 1);
         p.y = max(0, p.y);
 
         // Right bound clamp pushes x to -1 for empty lines.
-        p.x = min(p.x, filebuffer.line_len(p.y as usize) as i32 - 1);
+        p.x = min(p.x, buffer.line_len(p.y as usize) as i32 - 1);
         p.x = max(0, p.x);
 
         self.cursor = p;
@@ -887,7 +887,7 @@ impl Debugconsole {
 
 
 impl<'a> Screen<'a> {
-    fn mk_screen<'b>(window: Rec, framebuffer: &'b mut Framebuffer, fileview: &'b Fileview) -> Screen<'b> {
+    fn mk_screen<'b>(window: Rec, framebuffer: &'b mut Framebuffer, view: &'b View) -> Screen<'b> {
         let lineno_len = 5;
         let (header, filearea) = window.vsplit(1);
         let (linenoarea, textarea) = filearea.hsplit(lineno_len);
@@ -898,14 +898,14 @@ impl<'a> Screen<'a> {
             linenoarea,
             textarea,
             header,
-            fileview,
+            view,
         }
     }
 
-    fn draw(&mut self, draw: Draw, filebuffer: &Filebuffer) {
+    fn draw(&mut self, draw: Draw, buffer: &Buffer) {
         // TODO: use draw and only redraw what's needed
         // TODO: automatize the screen coordinate offsetting for framebuffer commands
-        let file_base_offset = self.fileview.filearea.min;
+        let file_base_offset = self.view.filearea.min;
         let frame_base_offset = self.textarea.min;
 
 //log(&format!("fileoffset: {}", file_base_offset));
@@ -913,20 +913,20 @@ impl<'a> Screen<'a> {
 
         // header
         {
-                let header_string = format!("{}  {:?}", self.fileview.filepath, self.fileview.movement_mode);
+                let header_string = format!("{}  {:?}", self.view.filepath, self.view.movement_mode);
                 self.framebuffer.put_line(self.header.min, header_string.as_bytes());
                 self.framebuffer.put_color(self.header, CONF.color_header_active);
         }
 
-        // filebuffer content
+        // buffer content
         {
-            let y_stop = min(self.textarea.h(), filebuffer.nlines() - file_base_offset.y);
+            let y_stop = min(self.textarea.h(), buffer.nlines() - file_base_offset.y);
             for i in 0..y_stop {
                 let lineoffset = vek(0, i);
                 let file_offset = file_base_offset + lineoffset;
                 let frame_offset = frame_base_offset + lineoffset;
 
-                let mut line = filebuffer.get_line(file_offset);
+                let mut line = buffer.get_line(file_offset);
                 line = clamp(line, self.textarea.w() as usize);
                 self.framebuffer.put_line(frame_offset, line);
             }
@@ -935,8 +935,8 @@ impl<'a> Screen<'a> {
         // lineno
         {
             let mut buf = [0 as u8; 4];
-            let lineno_base = if self.fileview.relative_lineno {
-                file_base_offset.y - self.fileview.cursor.y
+            let lineno_base = if self.view.relative_lineno {
+                file_base_offset.y - self.view.cursor.y
             } else {
                 file_base_offset.y + 1
             };
@@ -948,8 +948,8 @@ impl<'a> Screen<'a> {
         }
 
         {
-            let cursor_screen_position = self.fileview.cursor + self.textarea.min - file_base_offset;
-            if self.fileview.is_active {
+            let cursor_screen_position = self.view.cursor + self.textarea.min - file_base_offset;
+            if self.view.is_active {
                 self.framebuffer.set_cursor(cursor_screen_position);
             }
 
@@ -972,8 +972,8 @@ impl Line {
     }
 }
 
-impl Filebuffer {
-    fn from_file(text: Vec<u8>) -> Filebuffer {
+impl Buffer {
+    fn from_file(text: Vec<u8>) -> Buffer {
 
         let mut lines = Vec::new();
         let mut line_indexes = Vec::new();
@@ -1000,7 +1000,7 @@ impl Filebuffer {
             line_indexes.push(i);
         }
 
-        Filebuffer {
+        Buffer {
             textbuffer:         Textbuffer { text, lines },
             previous_snapshots: Vec::new(),
             current_snapshot:   Textsnapshot { line_indexes },
@@ -1036,8 +1036,8 @@ impl Filebuffer {
 }
 
 
-// Filebuffer ops
-impl Filebuffer {
+// Buffer ops
+impl Buffer {
 
     fn line_del(&mut self, y: usize) {
         assert!(y < self.current_snapshot.line_indexes.len());
@@ -1063,17 +1063,17 @@ impl Filebuffer {
 
 impl Editor {
 
-    fn mk_editor(filename: String, filebuffer: Filebuffer) -> Editor {
+    fn mk_editor(filename: String, buffer: Buffer) -> Editor {
         let window = Term::size();
         let framebuffer = Framebuffer::mk_framebuffer(window);
         let running = true;
         let (mainscreen, footer) = window.rec().vsplit(window.y - 1);
-        let fileview;
+        let view;
         {
             // reuse code in mk_Screen !!!
             let (_, filearea) = mainscreen.vsplit(1);
             let (_, textarea) = filearea.hsplit(5);
-            fileview = Fileview::mk_fileview(filename, textarea.size());
+            view = View::mk_fileview(filename, textarea.size());
         }
         let mode = EditorMode::Command;
 
@@ -1084,8 +1084,8 @@ impl Editor {
             framebuffer,
             mode,
             running,
-            filebuffer,
-            fileview,
+            buffer,
+            view,
         }
     }
 
@@ -1098,9 +1098,9 @@ impl Editor {
 
     fn refresh_screen(&mut self) {
         {
-            let mut screen = Screen::mk_screen(self.mainscreen, &mut self.framebuffer, &self.fileview);
+            let mut screen = Screen::mk_screen(self.mainscreen, &mut self.framebuffer, &self.view);
 
-            screen.draw(Draw::All, &self.filebuffer);
+            screen.draw(Draw::All, &self.buffer);
         }
 
         {
@@ -1109,7 +1109,7 @@ impl Editor {
             self.framebuffer.put_color(self.footer, self.mode.footer_color());
         }
 
-//log(&format!("file cursor: {}", self.fileview.cursor));
+//log(&format!("file cursor: {}", self.view.cursor));
 
         {
             self.framebuffer.push_frame();
@@ -1132,9 +1132,9 @@ impl Editor {
             Input::Key('l')    => self.mv_cursor(Move::Right),
             Input::Key('\t')   => self.switch_mode(),
             Input::Key('\\')   => Debugconsole::clear(),
-            Input::Key('d')    => self.filebuffer.line_del(usize(self.fileview.cursor.y)),
-            Input::Key('u')    => self.filebuffer.undo(),
-            Input::Key('s')    => self.filebuffer.to_file(&format!("{}.tmp", self.fileview.filepath)),
+            Input::Key('d')    => self.buffer.line_del(usize(self.view.cursor.y)),
+            Input::Key('u')    => self.buffer.undo(),
+            Input::Key('s')    => self.buffer.to_file(&format!("{}.tmp", self.view.filepath)),
 
             Input::Key(CTRL_C) => self.running = false,
 
@@ -1142,9 +1142,9 @@ impl Editor {
             _       => (),
         }
 
-        // TODO: update the fileview here regardless of the operation !
+        // TODO: update the view here regardless of the operation !
         //  for instance delete line can force a cursor update
-        self.fileview.update(&self.filebuffer);
+        self.view.update(&self.buffer);
     }
 
     fn mv_cursor(&mut self, m : Move) {
@@ -1157,7 +1157,7 @@ impl Editor {
         };
 
         // TODO: update the 'desired cursor position' instead of the real cursor position
-        self.fileview.cursor = self.fileview.cursor + delta;
+        self.view.cursor = self.view.cursor + delta;
     }
 
     fn switch_mode(&mut self) {
@@ -1181,7 +1181,7 @@ impl Editor {
 
 type Rez<T> = result::Result<T, String>;
 
-// TODO: associate this to a Filebuffer struct
+// TODO: associate this to a Buffer struct
 // TODO: probably I need to collapse all errors into strings, and create my own Result alias ...
 fn file_load(filename: &str) -> io::Result<Vec<u8>> {
     let fileinfo = try!(fs::metadata(filename));
@@ -1208,11 +1208,11 @@ fn main() {
         let filename = file!();
         let buf = file_load(filename).unwrap();
 
-        let filebuffer = Filebuffer::from_file(buf);
+        let buffer = Buffer::from_file(buf);
         //file_lines_print(&buf);
 
         rez = std::panic::catch_unwind(|| {
-            Editor::mk_editor(filename.to_string(), filebuffer).run();
+            Editor::mk_editor(filename.to_string(), buffer).run();
         });
     }
 
