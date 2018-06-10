@@ -229,13 +229,9 @@ struct Framebuffer {
     bg:         Vec<Color>,
     cursor:     Vek,            // Absolute screen coordinate relative to (0,0).
 
-    buffer:     Bytebuffer,
+    buffer:     Vec<u8>,
 }
 
-// Append only buffer with a cursor
-struct Bytebuffer {
-    bytes:  Vec<u8>,
-}
 
 // Transient object for putting text into a subrectangle of a framebuffer.
 // All positions are w.r.t the Framebuffer (0,0) origin.
@@ -671,32 +667,6 @@ fn subslice<'a, T>(s: &'a[T], offset: usize, len: usize) -> &'a[T] {
 /* CORE TYPE IMPLEMENTATION */
 
 
-impl Bytebuffer {
-    fn mk_bytebuffer() -> Bytebuffer {
-        Bytebuffer {
-            bytes:  vec![0; 64 * 1024],
-        }
-    }
-
-    fn rewind(&mut self) {
-        unsafe {
-            self.bytes.set_len(0);
-        }
-    }
-
-    fn append(&mut self, src: &[u8]) {
-        self.bytes.extend_from_slice(src);
-    }
-
-    // TODO: propagate error
-    fn write_into<T>(&self, t: &mut T) where T : io::Write {
-        let n = t.write(&self.bytes).unwrap();
-        t.flush().unwrap();
-        assert_eq!(n, self.bytes.len());
-    }
-}
-
-
 const frame_default_text : u8 = ' ' as u8;
 const frame_default_fg : Color = Color::Black;
 const frame_default_bg : Color = Color::White;
@@ -713,7 +683,7 @@ impl Framebuffer {
             fg:         vec![frame_default_fg; vlen],
             bg:         vec![frame_default_bg; vlen],
             cursor:     vek(0,0),
-            buffer:     Bytebuffer::mk_bytebuffer(),
+            buffer:     vec![0; 64 * 1024],
         }
     }
 
@@ -783,15 +753,18 @@ impl Framebuffer {
             CONSOLE.write_into(self);
         }
 
-        let mut buffer : Vec<u8> = vec![0; 64 * 1024];
+        fn append(dst: &mut Vec<u8>, src: &[u8]) {
+            dst.extend_from_slice(src);
+        }
+
+        let mut buffer = replace(&mut self.buffer, Vec::new());
 
         unsafe {
             buffer.set_len(0); // safe because element are pure values
         }
 
-        self.buffer.rewind();
-        self.buffer.append(term_cursor_hide);
-        self.buffer.append(term_gohome);
+        append(&mut buffer, term_cursor_hide);
+        append(&mut buffer, term_gohome);
 
         let w = self.window.x as usize;
         let mut l = 0;
@@ -799,7 +772,7 @@ impl Framebuffer {
         for i in 0..self.window.y {
             if i > 0 {
                 // Do not put "\r\n" on the last line
-                self.buffer.append(term_newline);
+                append(&mut buffer, term_newline);
             }
 
             if CONF.draw_colors {
@@ -810,16 +783,15 @@ impl Framebuffer {
                     // PERF: better color command creation without multiple string allocs.
                     let fg_code = colorcode(self.fg[j]);
                     let bg_code = colorcode(self.bg[j]);
-                    self.buffer.append(format!("\x1b[38;5;{};48;5;{}m", fg_code, bg_code).as_bytes());
-
-                    self.buffer.append(&self.text[j..k]);
+                    append(&mut buffer, format!("\x1b[38;5;{};48;5;{}m", fg_code, bg_code).as_bytes());
+                    append(&mut buffer, &self.text[j..k]);
                     if k == r {
                         break;
                     }
                     j = k;
                 }
             } else {
-                self.buffer.append(&self.text[l..r]);
+                append(&mut buffer, &self.text[l..r]);
             }
 
             l += w;
@@ -828,11 +800,18 @@ impl Framebuffer {
 
         // Terminal cursor coodinates start at (1,1)
         let cursor_command = format!("\x1b[{};{}H", self.cursor.y + 1, self.cursor.x + 1);
-        self.buffer.append(cursor_command.as_bytes());
-        self.buffer.append(term_cursor_show);
+        append(&mut buffer, cursor_command.as_bytes());
+        append(&mut buffer, term_cursor_show);
 
-        let stdout = io::stdout();
-        self.buffer.write_into(&mut stdout.lock());
+        {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            let n = handle.write(&buffer).unwrap();
+            handle.flush().unwrap();
+            assert_eq!(n, buffer.len());
+        }
+
+        self.buffer = buffer;
     }
 
     fn find_color_end(&self, a: usize, stop: usize) -> usize {
