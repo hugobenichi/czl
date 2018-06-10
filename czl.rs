@@ -42,6 +42,7 @@ const CONF : Config = Config {
 
     debug_console:          true,
     debug_bounds:           true,
+    debug_latency:          true,
 
     relative_lineno:        true,
     cursor_show_line:       true,
@@ -94,6 +95,7 @@ struct Config {
 
     debug_console:          bool,
     debug_bounds:           bool,
+    debug_latency:          bool,
 
     relative_lineno:        bool,
     cursor_show_line:       bool,
@@ -557,6 +559,30 @@ fn colorcode(c : Color) -> Colorcode {
 
 
 /* UTILITIES */
+
+struct Scopeclock<'a> {
+    tag: &'a str,
+    timestamp: std::time::SystemTime,
+}
+
+impl <'a> Scopeclock<'a> {
+    fn measure(tag: &'a str) -> Scopeclock {
+        let timestamp = std::time::SystemTime::now();
+
+        Scopeclock { tag, timestamp }
+    }
+}
+
+impl <'a> Drop for Scopeclock<'a> {
+    fn drop(&mut self) {
+        if !CONF.debug_latency {
+            return
+        }
+        let dt = self.timestamp.elapsed().unwrap();
+        log(&format!("{}: {}.{:06}", self.tag, dt.as_secs(), dt.subsec_nanos() / 1000));
+    }
+}
+
 
 fn itoa10(dst: &mut [u8], x: i32, padding: u8) {
     fill(dst, padding);
@@ -1098,19 +1124,18 @@ impl Editor {
         while self.running {
             let c = read_input();
 
-            let start = std::time::SystemTime::now();
+            // Caveat: this will be displayed on the next frame
+            let frame_time = Scopeclock::measure("last frame");
 
             self.process_input(c);
             self.refresh_screen();
-
-            let dt = start.elapsed().unwrap();
-            // Caveat: this will be displayed on the next frame
-            log(&format!("last latency: {}.{:06}", dt.as_secs(), dt.subsec_nanos() / 1000));
         }
     }
 
     fn refresh_screen(&mut self) {
         {
+            let draw_time = Scopeclock::measure("draw");
+
             let mut screen = Screen::mk_screen(self.mainscreen, &mut self.framebuffer, &self.view);
 
             screen.draw(Draw::All, &self.buffer);
@@ -1125,6 +1150,8 @@ impl Editor {
 //log(&format!("file cursor: {}", self.view.cursor));
 
         {
+            let push_frame_time = Scopeclock::measure("push_frame");
+
             self.framebuffer.push_frame();
             if !CONF.retain_frame {
                 self.framebuffer.clear();
