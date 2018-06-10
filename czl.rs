@@ -17,6 +17,7 @@ use std::mem::replace;
 
 /*
  * Next Steps:
+ *  - fix the catch/unwrap issues in main() !
  *  - cursor horizontal memory
  *  - add text insert
  *      commands: new line, line copy, insert mode, append char
@@ -29,7 +30,6 @@ use std::mem::replace;
  *  - think more about where to track the screen area:
  *      right now it is repeated both in Screen and in View
  *      ideally Screen would not be tracking it
- *  - systematically propagate errors everywhere
  *  - utf8 support: Line and Filebuffer, Input, ... don't wait too much
  *  - fix the non-statically linked term lib
  */
@@ -574,12 +574,14 @@ impl <'a> Scopeclock<'a> {
     }
 }
 
+const zero_duration : std::time::Duration = std::time::Duration::from_millis(0);
+
 impl <'a> Drop for Scopeclock<'a> {
     fn drop(&mut self) {
         if !CONF.debug_latency {
             return
         }
-        let dt = self.timestamp.elapsed().unwrap();
+        let dt = self.timestamp.elapsed().unwrap_or(zero_duration);
         log(&format!("{}: {}.{:06}", self.tag, dt.as_secs(), dt.subsec_nanos() / 1000));
     }
 }
@@ -749,9 +751,9 @@ impl Framebuffer {
     // TODO: propagate error
     // TODO: add color
     // PERF: skip unchanged sections
-    fn push_frame(&mut self) {
+    fn render(&mut self) -> Re<()> {
         if !CONF.draw_screen {
-            return
+            return Ok(())
         }
 
         unsafe {
@@ -763,7 +765,6 @@ impl Framebuffer {
         }
 
         let mut buffer = replace(&mut self.buffer, Vec::new());
-
         unsafe {
             buffer.set_len(0); // safe because element are pure values
         }
@@ -808,15 +809,20 @@ impl Framebuffer {
         append(&mut buffer, cursor_command.as_bytes());
         append(&mut buffer, term_cursor_show);
 
+        // IO to terminal
         {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
-            let n = handle.write(&buffer).unwrap();
-            handle.flush().unwrap();
+            let n = handle.write(&buffer)?;
+            handle.flush()?;
+
             assert_eq!(n, buffer.len());
         }
 
+        // Put back buffer in place for reuse
         self.buffer = buffer;
+
+        Ok(())
     }
 
     fn find_color_end(&self, a: usize, stop: usize) -> usize {
@@ -921,9 +927,6 @@ impl<'a> Screen<'a> {
         let file_base_offset = self.view.filearea.min;
         let frame_base_offset = self.textarea.min;
 
-//log(&format!("fileoffset: {}", file_base_offset));
-//log(&format!("textoffset: {}", frame_base_offset));
-
         // header
         {
                 let header_string = format!("{}  {:?}", self.view.filepath, self.view.movement_mode);
@@ -968,8 +971,6 @@ impl<'a> Screen<'a> {
 
             self.framebuffer.put_color(self.textarea.row(cursor_screen_position.y), CONF.color_cursor_lines);
             self.framebuffer.put_color(self.textarea.column(cursor_screen_position.x), CONF.color_cursor_lines);
-
-//log(&format!("screen cursor: {}", cursor_screen_position));
         }
     }
 }
@@ -986,7 +987,13 @@ impl Line {
 }
 
 impl Buffer {
-    fn from_file(text: Vec<u8>) -> Buffer {
+    fn from_file(path: &str) -> Re<Buffer> {
+        let text = file_load(path)?;
+
+        Ok(Buffer::from_text(text))
+    }
+
+    fn from_text(text: Vec<u8>) -> Buffer {
 
         let mut lines = Vec::new();
         let mut line_indexes = Vec::new();
@@ -1025,8 +1032,8 @@ impl Buffer {
         let mut f = fs::File::create(path)?;
 
         for i in 0..self.nlines() {
-            try!(f.write_all(self.get_line(vek(0,i))));
-            try!(f.write_all(b"\n")); // TODO: use platform's newline
+            f.write_all(self.get_line(vek(0,i)))?;
+            f.write_all(b"\n")?; // TODO: use platform's newline
         }
 
         Ok(())
@@ -1065,7 +1072,9 @@ impl Buffer {
 
     fn undo(&mut self) {
         match self.previous_snapshots.pop() {
-            Some(prev_snapshot) => self.current_snapshot = prev_snapshot,
+            Some(prev_snapshot) => {
+                self.current_snapshot = prev_snapshot
+            }
             None => (),
         }
     }
@@ -1105,46 +1114,47 @@ impl Editor {
     }
 
     fn run(&mut self) -> Re<()> {
-        self.refresh_screen();
+        self.refresh_screen()?;
 
         while self.running {
             let c = read_input()?;
 
-            // Caveat: this will be displayed on the next frame
-            let frame_time = Scopeclock::measure("last frame");
+            let frame_time = Scopeclock::measure("last frame");     // caveat: displayed on next frame only
 
-            try!(self.process_input(c));
-            self.refresh_screen();
+            self.process_input(c)?;
+            self.refresh_screen()?;
         }
 
         return Ok(());
     }
 
-    fn refresh_screen(&mut self) {
+    fn refresh_screen(&mut self) -> Re<()> {
+        // main screen
         {
             let draw_time = Scopeclock::measure("draw");
 
             let mut screen = Screen::mk_screen(self.mainscreen, &mut self.framebuffer, &self.view);
-
             screen.draw(Draw::All, &self.buffer);
         }
 
+        // footer
         {
             self.framebuffer.put_line(self.footer.min + vek(1,0), self.mode.name().as_bytes());
             self.framebuffer.put_line(self.footer.min + vek(10, 0), b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
             self.framebuffer.put_color(self.footer, self.mode.footer_color());
         }
 
-//log(&format!("file cursor: {}", self.view.cursor));
-
+        // renter frame to terminal
         {
-            let push_frame_time = Scopeclock::measure("push_frame");
+            let push_frame_time = Scopeclock::measure("render");
 
-            self.framebuffer.push_frame();
+            self.framebuffer.render()?;
             if !CONF.retain_frame {
                 self.framebuffer.clear();
             }
         }
+
+        Ok(())
     }
 
     fn process_input(&mut self, c: Input) -> Re<()> {
@@ -1160,7 +1170,9 @@ impl Editor {
             Input::Key('\\')   => Debugconsole::clear(),
             Input::Key('d')    => self.buffer.line_del(usize(self.view.cursor.y)),
             Input::Key('u')    => self.buffer.undo(),
-            Input::Key('s')    => try!(self.buffer.to_file(&format!("{}.tmp", self.view.filepath))),
+            Input::Key('s')    => self.buffer.to_file(&format!("{}.tmp", self.view.filepath))?,
+
+            Input::Key('b')    => panic!("BOOM !"),
 
             Input::Key(CTRL_C) => self.running = false,
 
@@ -1210,13 +1222,13 @@ impl Editor {
 // TODO: associate this to a Buffer struct
 // TODO: probably I need to collapse all errors into strings, and create my own Result alias ...
 fn file_load(filename: &str) -> io::Result<Vec<u8>> {
-    let fileinfo = try!(fs::metadata(filename));
+    let fileinfo = fs::metadata(filename)?;
     let size = fileinfo.len() as usize;
 
     let mut buf = vec![0; size];
-    let mut f = try!(fs::File::open(filename));
+    let mut f = fs::File::open(filename)?;
 
-    let nread = try!(f.read(&mut buf));
+    let nread = f.read(&mut buf)?;
     if nread != size {
         // why so ugly ...
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "not read enough bytes")); // TODO: add number of bytes
@@ -1226,27 +1238,17 @@ fn file_load(filename: &str) -> io::Result<Vec<u8>> {
 }
 
 fn main() {
-    let rez;
-
-    {
-        let term = Term::set_raw();
+    let run = || {
+        let term = Term::set_raw()?;
 
         let filename = file!();
-        let buf = file_load(filename).unwrap();
+        let buffer = Buffer::from_file(filename)?;
 
-        let buffer = Buffer::from_file(buf);
-        //file_lines_print(&buf);
+        Editor::mk_editor(filename.to_string(), buffer).run()
+    };
 
-        rez = std::panic::catch_unwind(|| {
-            Editor::mk_editor(filename.to_string(), buffer).run().unwrap();
-        });
-    }
-
-    rez.unwrap();
+    std::panic::catch_unwind(run).unwrap().unwrap(); // CLEANUP: get rid of nested Result !!
 }
-
-
-
 
 
 /* TERMINAL BINDINGS */
@@ -1279,24 +1281,22 @@ impl Term {
         }
     }
 
-    fn set_raw() -> Term {
-        if CONF.no_raw_mode {
-            return Term { }
+    fn set_raw() -> Re<Term> {
+        if !CONF.no_raw_mode {
+            let stdout = io::stdout();
+            let mut h = stdout.lock();
+            h.write(term_cursor_save)?;
+            h.write(term_switch_offscreen)?;
+            h.write(term_switch_mouse_event_on)?;
+            h.write(term_switch_mouse_tracking_on)?;
+            h.flush()?;
+
+            unsafe {
+                let _ = terminal_set_raw();
+            }
         }
 
-        let stdout = io::stdout();
-        let mut h = stdout.lock();
-        h.write(term_cursor_save).unwrap();
-        h.write(term_switch_offscreen).unwrap();
-        h.write(term_switch_mouse_event_on).unwrap();
-        h.write(term_switch_mouse_tracking_on).unwrap();
-        h.flush().unwrap();
-
-        unsafe {
-            let _ = terminal_set_raw();
-        }
-
-        Term { }
+        Ok(Term { })
     }
 }
 
@@ -1402,7 +1402,7 @@ fn read_input() -> Re<Input> {
     }
 
     // Escape sequence
-    assert_eq!(read_char().unwrap(), '[');
+    assert_eq!(read_char()?, '[');
 
     match read_char()? {
         'M' =>  (), // Mouse click, handled below
