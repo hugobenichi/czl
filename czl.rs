@@ -25,7 +25,6 @@ use std::mem::replace;
  * General TODOs:
  *  - handle resize
  *  - dir explorer
- *  - frame latency stats
  *  - command mode pending input
  *  - think more about where to track the screen area:
  *      right now it is repeated both in Screen and in View
@@ -660,17 +659,6 @@ impl Bytebuffer {
     }
 
     fn append(&mut self, src: &[u8]) {
-//        let dst = &mut self.bytes;
-//        let l = src.len();
-//        let c1 = dst.len();
-//        let c2 = c1 + l;
-//        if c2 > dst.capacity() {
-//            dst.reserve(l);
-//        }
-//        unsafe {
-//            dst.set_len(c2);
-//        }
-//        copy_exact(&mut dst[c1..c2], src);
         self.bytes.extend_from_slice(src);
     }
 
@@ -1105,9 +1093,19 @@ impl Editor {
     }
 
     fn run(&mut self) {
+        self.refresh_screen();
+
         while self.running {
+            let c = read_input();
+
+            let start = std::time::SystemTime::now();
+
+            self.process_input(c);
             self.refresh_screen();
-            self.process_input();
+
+            let dt = start.elapsed().unwrap();
+            // Caveat: this will be displayed on the next frame
+            log(&format!("last latency: {}.{:06}", dt.as_secs(), dt.subsec_nanos() / 1000));
         }
     }
 
@@ -1134,9 +1132,7 @@ impl Editor {
         }
     }
 
-    fn process_input(&mut self) {
-        let c = read_input();
-
+    fn process_input(&mut self, c: Input) {
         log(&format!("input: {:?}", c));
 
         // TODO: more sophisticated cursor movement ...
