@@ -234,7 +234,6 @@ struct Framebuffer {
 // Append only buffer with a cursor
 struct Bytebuffer {
     bytes:  Vec<u8>,
-    cursor: usize,
 }
 
 // Transient object for putting text into a subrectangle of a framebuffer.
@@ -308,6 +307,7 @@ struct View {
     show_selection:     bool,
     is_active:          bool,
     cursor:             Vek,
+    cursor_memory:      Vek,
     filearea:           Rec,
     //selection:  Option<&[Selection]>
 }
@@ -323,42 +323,48 @@ impl View {
             show_selection:     false,
             is_active:          true,
             cursor:             vek(0,0),
+            cursor_memory:      vek(0,0),
             filearea:           screensize.rec(),
         }
     }
 
     fn update(&mut self, buffer: &Buffer) {
-        // TODO: this should track a 'desired cursor position' and take this into
-        // account when adjusting the real cursor position.
-        let mut p = self.cursor;
+        // Cursor adjustment
+        {
+            let mut p = self.cursor;
 
-        p.y = min(p.y, buffer.nlines() - 1);
-        p.y = max(0, p.y);
+            p.y = min(p.y, buffer.nlines() - 1);
+            p.y = max(0, p.y);
 
-        // Right bound clamp pushes x to -1 for empty lines.
-        p.x = min(p.x, buffer.line_len(p.y as usize) as i32 - 1);
-        p.x = max(0, p.x);
+            // Right bound clamp pushes x to -1 for empty lines.
+            p.x = min(p.x, buffer.line_len(p.y as usize) as i32 - 1);
+            p.x = max(0, p.x);
 
-        self.cursor = p;
-
-        let mut dx = 0;
-        let mut dy = 0;
-
-        if p.y < self.filearea.min.y {
-            dy = p.y - self.filearea.min.y;
-        }
-        if self.filearea.max.y <= p.y {
-            dy = p.y + 1 - self.filearea.max.y;
-        }
-        if p.x < self.filearea.min.x {
-            dx = p.x - self.filearea.min.x;
-        }
-        if self.filearea.max.x <= p.x {
-            dx = p.x + 1 - self.filearea.max.x;
+            self.cursor = p;
         }
 
-        self.filearea = self.filearea + vek(dx, dy);
-        // TODO: add horizontal scrolling !
+        // text range adjustment
+        {
+            let p = self.cursor;
+
+            let mut dx = 0;
+            let mut dy = 0;
+
+            if p.y < self.filearea.min.y {
+                dy = p.y - self.filearea.min.y;
+            }
+            if self.filearea.max.y <= p.y {
+                dy = p.y + 1 - self.filearea.max.y;
+            }
+            if p.x < self.filearea.min.x {
+                dx = p.x - self.filearea.min.x;
+            }
+            if self.filearea.max.x <= p.x {
+                dx = p.x + 1 - self.filearea.max.x;
+            }
+
+            self.filearea = self.filearea + vek(dx, dy);
+        }
     }
 }
 
@@ -644,35 +650,38 @@ impl Bytebuffer {
     fn mk_bytebuffer() -> Bytebuffer {
         Bytebuffer {
             bytes:  vec![0; 64 * 1024],
-            cursor: 0,
         }
     }
 
     fn rewind(&mut self) {
-        self.cursor = 0
+        unsafe {
+            self.bytes.set_len(0);
+        }
     }
 
     fn append(&mut self, src: &[u8]) {
-        let dst = &mut self.bytes;
-        let l = src.len();
-        let c1 = self.cursor;
-        let c2 = c1 + l;
-        if c2 > dst.capacity() {
-            dst.reserve(l);
-        }
-        copy_exact( &mut dst[c1..c2], src);
-        self.cursor = c2;
+//        let dst = &mut self.bytes;
+//        let l = src.len();
+//        let c1 = dst.len();
+//        let c2 = c1 + l;
+//        if c2 > dst.capacity() {
+//            dst.reserve(l);
+//        }
+//        unsafe {
+//            dst.set_len(c2);
+//        }
+//        copy_exact(&mut dst[c1..c2], src);
+        self.bytes.extend_from_slice(src);
     }
 
     // TODO: propagate error
     fn write_into<T>(&self, t: &mut T) where T : io::Write {
-        let c = self.cursor;
-        let d = &self.bytes[0..c];
-        let n = t.write(d).unwrap();
+        let n = t.write(&self.bytes).unwrap();
         t.flush().unwrap();
-        assert_eq!(n, c);
+        assert_eq!(n, self.bytes.len());
     }
 }
+
 
 const frame_default_text : u8 = ' ' as u8;
 const frame_default_fg : Color = Color::Black;
@@ -758,6 +767,12 @@ impl Framebuffer {
 
         unsafe {
             CONSOLE.write_into(self);
+        }
+
+        let mut buffer : Vec<u8> = vec![0; 64 * 1024];
+
+        unsafe {
+            buffer.set_len(0); // safe because element are pure values
         }
 
         self.buffer.rewind();
