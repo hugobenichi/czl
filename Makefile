@@ -5,14 +5,18 @@ OUTDIR=build
 builddir:
 	mkdir -p $(OUTDIR)
 
-$(OUTDIR)/libterm.a: builddir term.c
+termlinux: builddir term.c
 	gcc -c term.c -o $(OUTDIR)/term.o
-	#ar -r cs $(OUTDIR)/libterm.a $(OUTDIR)/term.o # works on both linux and osx
+	ar -rcs $(OUTDIR)/libterm.a $(OUTDIR)/term.o
+
+termosx: builddir term.c
+	gcc -c term.c -o $(OUTDIR)/term.o
+	ar -r cs $(OUTDIR)/libterm.a $(OUTDIR)/term.o
 
 native: builddir $(OUTDIR)/libterm.a
 
 $(OUTDIR)/czl: czl.rs
-	rustc -g --out-dir $(OUTDIR) -L ./$(OUTDIR) $<
+	rustc -C opt-level=1 -g --out-dir $(OUTDIR) -L ./$(OUTDIR) $<
 
 build: builddir native $(OUTDIR)/czl
 
