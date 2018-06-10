@@ -10,7 +10,6 @@ use std::fs;
 use std::io;
 use std::io::prelude::*;
 use std::str;
-use std::result;
 use std::cmp::min;
 use std::cmp::max;
 use std::mem::replace;
@@ -559,6 +558,9 @@ fn colorcode(c : Color) -> Colorcode {
 
 /* UTILITIES */
 
+
+type Re<T> = Result<T, io::Error>;
+
 struct Scopeclock<'a> {
     tag: &'a str,
     timestamp: std::time::SystemTime,
@@ -1019,13 +1021,15 @@ impl Buffer {
     }
 
     // TODO: propagate errors
-    fn to_file(&self, path: &str) {
-        let mut f = fs::File::create(path).unwrap();
+    fn to_file(&self, path: &str) -> Re<()> {
+        let mut f = fs::File::create(path)?;
 
         for i in 0..self.nlines() {
-            f.write_all(self.get_line(vek(0,i))).unwrap();
-            f.write_all(b"\n").unwrap(); // TODO: use platform's newline
+            try!(f.write_all(self.get_line(vek(0,i))));
+            try!(f.write_all(b"\n")); // TODO: use platform's newline
         }
+
+        Ok(())
     }
 
     fn nlines(&self) -> i32 {
@@ -1109,7 +1113,7 @@ impl Editor {
             // Caveat: this will be displayed on the next frame
             let frame_time = Scopeclock::measure("last frame");
 
-            self.process_input(c);
+            try!(self.process_input(c));
             self.refresh_screen();
         }
 
@@ -1143,7 +1147,7 @@ impl Editor {
         }
     }
 
-    fn process_input(&mut self, c: Input) {
+    fn process_input(&mut self, c: Input) -> Re<()> {
         log(&format!("input: {:?}", c));
 
         // TODO: more sophisticated cursor movement ...
@@ -1156,7 +1160,7 @@ impl Editor {
             Input::Key('\\')   => Debugconsole::clear(),
             Input::Key('d')    => self.buffer.line_del(usize(self.view.cursor.y)),
             Input::Key('u')    => self.buffer.undo(),
-            Input::Key('s')    => self.buffer.to_file(&format!("{}.tmp", self.view.filepath)),
+            Input::Key('s')    => try!(self.buffer.to_file(&format!("{}.tmp", self.view.filepath))),
 
             Input::Key(CTRL_C) => self.running = false,
 
@@ -1167,6 +1171,8 @@ impl Editor {
         // TODO: update the view here regardless of the operation !
         //  for instance delete line can force a cursor update
         self.view.update(&self.buffer);
+
+        Ok(())
     }
 
     fn mv_cursor(&mut self, m : Move) {
@@ -1200,9 +1206,6 @@ impl Editor {
 
 
 
-
-//type Re<T> = result::Result<T, String>;
-type Re<T> = result::Result<T, io::Error>;
 
 // TODO: associate this to a Buffer struct
 // TODO: probably I need to collapse all errors into strings, and create my own Result alias ...
@@ -1375,7 +1378,7 @@ fn is_printable(c : char) -> bool {
     ESC < c && c < BACKSPACE
 }
 
-fn read_char() -> result::Result<char, io::Error> {
+fn read_char() -> Result<char, io::Error> {
     let mut stdin = io::stdin();
     let mut buf = [0;1];
     // TODO: handle interrupts when errno == EINTR
