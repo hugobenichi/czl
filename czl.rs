@@ -21,6 +21,7 @@ use std::mem::replace;
  *  - cursor horizontal memory
  *  - add text insert
  *      commands: new line, line copy, insert mode, append char
+ *  - BUG mouse clicks are not correctly parsed
  *
  * General TODOs:
  *  - handle resize
@@ -30,6 +31,8 @@ use std::mem::replace;
  *      right now it is repeated both in Screen and in View
  *      ideally Screen would not be tracking it
  *  - systematically propagate errors everywhere
+ *  - utf8 support: Line and Filebuffer, Input, ... don't wait too much
+ *  - fix the non-statically linked term lib
  */
 
 
@@ -976,7 +979,7 @@ impl Line {
     }
 
     fn len(self) -> usize {
-        self.stop - self.start // BUG: not utf8 aware ! no tab aware !
+        self.stop - self.start
     }
 }
 
@@ -1097,11 +1100,11 @@ impl Editor {
         }
     }
 
-    fn run(&mut self) {
+    fn run(&mut self) -> Re<()> {
         self.refresh_screen();
 
         while self.running {
-            let c = read_input();
+            let c = read_input()?;
 
             // Caveat: this will be displayed on the next frame
             let frame_time = Scopeclock::measure("last frame");
@@ -1109,6 +1112,8 @@ impl Editor {
             self.process_input(c);
             self.refresh_screen();
         }
+
+        return Ok(());
     }
 
     fn refresh_screen(&mut self) {
@@ -1196,7 +1201,8 @@ impl Editor {
 
 
 
-type Rez<T> = result::Result<T, String>;
+//type Re<T> = result::Result<T, String>;
+type Re<T> = result::Result<T, io::Error>;
 
 // TODO: associate this to a Buffer struct
 // TODO: probably I need to collapse all errors into strings, and create my own Result alias ...
@@ -1229,7 +1235,7 @@ fn main() {
         //file_lines_print(&buf);
 
         rez = std::panic::catch_unwind(|| {
-            Editor::mk_editor(filename.to_string(), buffer).run();
+            Editor::mk_editor(filename.to_string(), buffer).run().unwrap();
         });
     }
 
@@ -1369,45 +1375,43 @@ fn is_printable(c : char) -> bool {
     ESC < c && c < BACKSPACE
 }
 
-fn read_char() -> char {
+fn read_char() -> result::Result<char, io::Error> {
     let mut stdin = io::stdin();
     let mut buf = [0;1];
     // TODO: handle interrupts when errno == EINTR
-    // TODO: propagate error otherwise
     // TODO: support unicode !
     loop {
-        let n = stdin.read(&mut buf).unwrap();
+        let n = stdin.read(&mut buf)?;
         if n == 1 {
             break;
         }
         // otherwise, it's a timeout => retry
     }
 
-    buf[0] as char
+    Ok(buf[0] as char)
 }
 
-fn read_input() -> Input {
-    let c = read_char();
+fn read_input() -> Re<Input> {
+    let c = read_char()?;
 
     if c != ESC {
-        return Input::Key(c);
+        return Ok(Input::Key(c))
     }
 
     // Escape sequence
-    assert_eq!(read_char(), '[');
+    assert_eq!(read_char().unwrap(), '[');
 
-    // BUG: mouse clicks are not correctly parsed
-    match read_char() {
+    match read_char()? {
         'M' =>  (), // Mouse click, handled below
-        'Z' =>  return Input::EscZ,
-        _   =>  return Input::UnknownEscSeq
+        'Z' =>  return Ok(Input::EscZ),
+        _   =>  return Ok(Input::UnknownEscSeq),
     }
 
     // Mouse click
     // TODO: support other mouse modes
-    let c2 = read_char();
-    let mut x = (read_char() as i32) - 33;
-    let mut y = (read_char() as i32) - 33;
+    let c2 = read_char()?;
+    let mut x = (read_char()? as i32) - 33;
+    let mut y = (read_char()? as i32) - 33;
     if x < 0 {
         x += 255;
     }
@@ -1417,10 +1421,11 @@ fn read_input() -> Input {
 
     let v = vek(x,y);
 
-    // BUG: does not work currently. Maybe terminal setup is wrong ?
-    match c2 as i32 {
-        0 ... 2 =>  return Input::Click(v),
-        3       =>  return Input::ClickRelease(v),
-        _       =>  return Input::UnknownEscSeq,
-    }
+    let r = match c2 as i32 {
+        0 ... 2 =>  Input::Click(v),
+        3       =>  Input::ClickRelease(v),
+        _       =>  Input::UnknownEscSeq,
+    };
+
+    Ok(r)
 }
