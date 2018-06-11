@@ -17,9 +17,7 @@ use std::mem::replace;
 
 /*
  * Next Steps:
- *  - introduce custom errors which capture backtraces !
  *  - fix the catch/unwrap issues in main() !
- *  - use unwind in a way where the stacktrace is useful !
  *  - cursor horizontal memory
  *  - add text insert
  *      commands: new line, line copy, insert mode, append char
@@ -1247,10 +1245,17 @@ fn file_load(filename: &str) -> io::Result<Vec<u8>> {
 }
 
 fn main() {
-    // CLEANUP: get rid of nested unwrap !
-    std::panic::catch_unwind(|| {
+//    let run = || {
+//        try!(Editor::mk_editor()).run();
+//
+//        Ok(())
+//    };
+//
+//    std::panic::catch_unwind(run).unwrap().unwrap(); // CLEANUP: get rid of nested Result !!
+
+    str::panic::catch_unwind(|| {
         Editor::run().unwrap();
-    }).unwrap();
+    });
 }
 
 
