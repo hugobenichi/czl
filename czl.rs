@@ -26,6 +26,8 @@ use std::mem::replace;
  *  - BUG mouse clicks are not correctly parsed
  *
  * General TODOs:
+ *  - cleanup: open Enum::* locally !
+ *  - import std stuff more locally
  *  - handle resize
  *  - dir explorer
  *  - command mode pending input
@@ -206,17 +208,20 @@ const MODE_COMMAND : &'static str = "Command";
 const MODE_INSERT  : &'static str = "Insert ";
 
 impl EditorMode {
+
     fn footer_color(self) -> Colorcell {
+        use EditorMode::*;
         match self {
-            EditorMode::Command =>  CONF.color_mode_command,
-            EditorMode::Insert  =>  CONF.color_mode_insert,
+            Command =>  CONF.color_mode_command,
+            Insert  =>  CONF.color_mode_insert,
         }
     }
 
     fn name(self) -> &'static str {
+        use EditorMode::*;
         match self {
-            EditorMode::Command =>  MODE_COMMAND,
-            EditorMode::Insert  =>  MODE_INSERT,
+            Command =>  MODE_COMMAND,
+            Insert  =>  MODE_INSERT,
         }
     }
 }
@@ -262,7 +267,7 @@ struct Textbuffer {
     lines:  Vec<Line>,  // subslices into the buffer or appendbuffer
 }
 
-#[derive(Clone)]
+#[derive(Clone)] // Do I need clone ??
 struct Textsnapshot {
     line_indexes: Vec<usize> // the actual lines in the current files, as indexes into 'lines'
 }
@@ -271,9 +276,9 @@ struct Textsnapshot {
 // Q: can I have a vec in a struct and another subslice pointing into that vec ?
 //    I would need to say that they both have the same lifetime as the struct.
 struct Buffer {
-    textbuffer: Textbuffer,
-    previous_snapshots: Vec<Textsnapshot>,
-    current_snapshot: Textsnapshot,
+    textbuffer:             Textbuffer,
+    previous_snapshots:     Vec<Textsnapshot>,
+    current_snapshot:       Textsnapshot,
 }
 
 // A pair of offsets into a buffer for delimiting lines.
@@ -283,13 +288,21 @@ struct Line {
     stop:   usize,      // exclusive
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Linerange {
-    // TODO: would that be useful to represent a file as a list of line range ?
-    //       what about fragmentation after a while ? Aren't Lineranges going to collapse to single
-    //       line ranges ?
-    start:  usize,
-    stop:   usize,
+enum BufferOps {
+    Delete(usize),
+    Insert(usize),
+}
+
+enum BufferCommand {
+    DelLine(usize),
+    Append(Vek, char),
+    Undo,
+    Redo,
+}
+
+enum BufferState {
+    Viewing,
+    Inserting,
 }
 
 // Point to a place inside a Buffer
@@ -534,26 +547,27 @@ impl std::ops::Sub<Vek> for Rec {
 /* Colors */
 
 fn colorcode(c : Color) -> Colorcode {
+    use Color::*;
     match c {
         // TODO !
-        Color::Black                    => 0,
-        Color::Red                      => 1,
-        Color::Green                    => 2,
-        Color::Yellow                   => 3,
-        Color::Blue                     => 4,
-        Color::Magenta                  => 5,
-        Color::Cyan                     => 6,
-        Color::White                    => 7,
-        Color::BoldBlack                => 8,
-        Color::BoldRed                  => 9,
-        Color::BoldGreen                => 10,
-        Color::BoldYellow               => 11,
-        Color::BoldBlue                 => 12,
-        Color::BoldMagenta              => 13,
-        Color::BoldCyan                 => 14,
-        Color::BoldWhite                => 15,
-        Color::RGB216 { r, g, b }       => 15 + (r + 6 * (g + 6 * b)),
-        Color::Gray(g)                  => 255 - g,
+        Black                    => 0,
+        Red                      => 1,
+        Green                    => 2,
+        Yellow                   => 3,
+        Blue                     => 4,
+        Magenta                  => 5,
+        Cyan                     => 6,
+        White                    => 7,
+        BoldBlack                => 8,
+        BoldRed                  => 9,
+        BoldGreen                => 10,
+        BoldYellow               => 11,
+        BoldBlue                 => 12,
+        BoldMagenta              => 13,
+        BoldCyan                 => 14,
+        BoldWhite                => 15,
+        RGB216 { r, g, b }       => 15 + (r + 6 * (g + 6 * b)),
+        Gray(g)                  => 255 - g,
     }
 }
 
@@ -1015,11 +1029,25 @@ impl Buffer {
                 };
                 lines.push(Line { start: a, stop: b });
                 a = b + 1; // skip the '\n'
+
+                if lines.len() == 20 {
+                    break;
+                }
             }
         }
 
         for i in 0..lines.len() {
             line_indexes.push(i);
+        }
+
+        // HACK: just temporary until I had cursor position to append and have proper insert mode !
+        //       this is necessary to start a newline for appending chars, until command -> insert
+        //       mode transation does this properly.
+        {
+            let start = text.len();
+            let stop = text.len();
+            line_indexes.push(lines.len());
+            lines.push(Line { start, stop });
         }
 
         Buffer {
@@ -1059,6 +1087,27 @@ impl Buffer {
     }
 }
 
+impl Textbuffer {
+    // TODO: this need to support on-going append in the middle of a line !
+    //       todo that, add three parameters
+    //          the type of insert (insert(x_pos), append, replace(x_pos))
+    fn append(&mut self, c: char) -> Option<usize> {
+        // TODO: don't handle ENTER here, instead catch it in the Insert mode toplvl handler and
+        // map it to line operations based on the cursor position
+        if c == ENTER {
+            let start = self.text.len();
+            let stop = start;
+            self.lines.push(Line { start, stop });
+
+            return Some(self.lines.len() - 1);
+        }
+
+        self.text.push(c as u8);
+        self.lines.last_mut().unwrap().stop += 1;
+
+        None
+    }
+}
 
 // Buffer ops
 impl Buffer {
@@ -1081,8 +1130,24 @@ impl Buffer {
         }
     }
 
-    fn append(&mut self, c: u8) {
-        // TODO
+    fn append(&mut self, c: char) {
+        match self.textbuffer.append(c) {
+            Some(newline)   => self.current_snapshot.line_indexes.push(newline),
+            None            => ()
+        }
+    }
+
+    fn command(&mut self, command: BufferCommand) {
+        use BufferCommand::*;
+        match command {
+            DelLine(lineno) => self.line_del(lineno),
+
+            Append(cursor, c) => self.append(c), // TODO: take into account cursor
+
+            Undo    => self.undo(),
+
+            Redo    => ()
+        }
     }
 }
 
@@ -1170,20 +1235,24 @@ impl Editor {
         log(&format!("input: {:?}", c));
 
         // TODO: more sophisticated cursor movement ...
+        use Input::*;
         match c {
-            Input::Key('h')    => self.mv_cursor(Move::Left),
-            Input::Key('j')    => self.mv_cursor(Move::Down),
-            Input::Key('k')    => self.mv_cursor(Move::Up),
-            Input::Key('l')    => self.mv_cursor(Move::Right),
-            Input::Key('\t')   => self.switch_mode(),
-            Input::Key('\\')   => Debugconsole::clear(),
-            Input::Key('d')    => self.buffer.line_del(usize(self.view.cursor.y)),
-            Input::Key('u')    => self.buffer.undo(),
-            Input::Key('s')    => self.buffer.to_file(&format!("{}.tmp", self.view.filepath))?,
+            Key('h')    => self.mv_cursor(Move::Left),
+            Key('j')    => self.mv_cursor(Move::Down),
+            Key('k')    => self.mv_cursor(Move::Up),
+            Key('l')    => self.mv_cursor(Move::Right),
+            Key('\t')   => self.switch_mode(),
+            Key('\\')   => Debugconsole::clear(),
+            Key('d')    => self.buffer.line_del(usize(self.view.cursor.y)),
+            Key('u')    => self.buffer.undo(),
+            Key('s')    => self.buffer.to_file(&format!("{}.tmp", self.view.filepath))?,
 
-            Input::Key('b')    => panic!("BOOM !"),
+            //Key('b')    => panic!("BOOM !"),
 
-            Input::Key(CTRL_C) => self.running = false,
+            Key(CTRL_C) => self.running = false,
+
+            // TODO: move that to insert mode !!
+            Key(c) if is_printable(c) /* HACK */ || c == ENTER => self.buffer.append(c);
 
             // noop by default
             _       => (),
@@ -1197,12 +1266,13 @@ impl Editor {
     }
 
     fn mv_cursor(&mut self, m : Move) {
+        use Move::*;
         let delta = match m {
-            Move::Left  => vek(-1,0),
-            Move::Right => vek(1,0),
-            Move::Up    => vek(0,-1),
-            Move::Down  => vek(0,1),
-            _           => vek(0,0),
+            Left  => vek(-1,0),
+            Right => vek(1,0),
+            Up    => vek(0,-1),
+            Down  => vek(0,1),
+            _     => vek(0,0),
         };
 
         // TODO: update the 'desired cursor position' instead of the real cursor position
@@ -1210,9 +1280,10 @@ impl Editor {
     }
 
     fn switch_mode(&mut self) {
+        use EditorMode::*;
         let newmode = match self.mode {
-            EditorMode::Command =>  EditorMode::Insert,
-            EditorMode::Insert  =>  EditorMode::Command,
+            Command =>  EditorMode::Insert,
+            Insert  =>  EditorMode::Command,
         };
         self.mode = newmode;
     }
@@ -1360,14 +1431,14 @@ enum Input {
 }
 
 const NO_KEY    : char = 0 as char;
-const CTRL_C    : char = 3 as char;
-const CTRL_D    : char = 4 as char;
+const CTRL_C    : char = 3 as char;       // end of text
+const CTRL_D    : char = 4 as char;       // end of transmission
 const CTRL_F    : char = 6 as char;
 const CTRL_H    : char = 8 as char;
 const TAB       : char = 9 as char;       // also ctrl + i
-const RETURN    : char = 10 as char;      // also ctrl + j
-const CTRL_K    : char = 11 as char;
-const CTRL_L    : char = 12 as char;
+const LINE_FEED : char = 10 as char;      // also ctrl + j
+const VTAB      : char = 11 as char;      // also ctrl + k
+const NEW_PAGE  : char = 12 as char;      // also ctrl + l
 const ENTER     : char = 13 as char;
 const CTRL_Q    : char = 17 as char;
 const CTRL_S    : char = 19 as char;
