@@ -351,7 +351,7 @@ impl View {
             p.y = max(0, p.y);
 
             // Right bound clamp pushes x to -1 for empty lines.
-            p.x = min(p.x, buffer.line_len(p.y as usize) as i32 - 1);
+            p.x = min(p.x, i32(buffer.line_len(usize(p.y))) - 1);
             p.x = max(0, p.x);
 
             self.cursor = p;
@@ -574,8 +574,33 @@ fn colorcode(c : Color) -> Colorcode {
 
 /* UTILITIES */
 
+type Re<T> = Result<T, Er>;
 
-type Re<T> = Result<T, io::Error>;
+#[derive(Debug)]
+struct Er {
+    err: Box<std::error::Error>,
+    // TODO: add stacktrace
+}
+
+
+impl fmt::Display for Er {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.err.fmt(f)
+    }
+}
+
+impl std::error::Error for Er {
+    fn description(&self) -> &str {
+        self.err.description()
+    }
+}
+
+impl From<io::Error> for Er {
+    fn from(err: io::Error) -> Er {
+        Er { err: Box::new(err) }
+    }
+}
+
 
 struct Scopeclock<'a> {
     tag: &'a str,
@@ -627,10 +652,16 @@ fn itoa10(dst: &mut [u8], x: i32, padding: u8) {
     }
 }
 
+
 // Because lame casting syntax
 fn usize(x: i32) -> usize {
     x as usize
 }
+
+fn i32(x: usize) -> i32 {
+    x as i32
+}
+
 
 fn ordered<T>(v1: T, v2: T) -> (T, T) where T : Ord {
     if v1 < v2 {
@@ -1070,7 +1101,7 @@ impl Buffer {
     }
 
     fn nlines(&self) -> i32 {
-        self.current_snapshot.line_indexes.len() as i32
+        i32(self.current_snapshot.line_indexes.len())
     }
 
     fn line_len(&self, y: usize) -> usize {
@@ -1247,15 +1278,18 @@ impl Editor {
             Key('u')    => self.buffer.undo(),
             Key('s')    => self.buffer.to_file(&format!("{}.tmp", self.view.filepath))?,
 
-            //Key('b')    => panic!("BOOM !"),
+            Key('b')
+//                        => panic!("BOOM !"),
+                        => return Err(From::from(io::Error::new(io::ErrorKind::UnexpectedEof, "boom !"))),
 
             Key(CTRL_C) => self.running = false,
 
             // TODO: move that to insert mode !!
-            Key(c) if is_printable(c) /* HACK */ || c == ENTER => self.buffer.append(c);
+            Key(c) if is_printable(c) /* HACK */ || c == ENTER
+                        => self.buffer.append(c),
 
             // noop by default
-            _       => (),
+            _ => (),
         }
 
         // TODO: update the view here regardless of the operation !
@@ -1319,9 +1353,9 @@ fn file_load(filename: &str) -> io::Result<Vec<u8>> {
 
 fn main() {
     // CLEANUP: get rid of nested unwrap !
-    std::panic::catch_unwind(|| {
+    //std::panic::catch_unwind(|| {
         Editor::run().unwrap();
-    }).unwrap();
+    //}).unwrap();
 }
 
 
