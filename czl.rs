@@ -4,33 +4,31 @@
 #![allow(unused_variables)]
 
 
-
+use std::cmp::max;
+use std::cmp::min;
+use std::fmt::Display;
 use std::fmt;
 use std::fs;
+use std::io::Read;
+use std::io::Write;
 use std::io;
-use std::io::prelude::*;
-use std::str;
-use std::cmp::min;
-use std::cmp::max;
 use std::mem::replace;
 
 
 /*
  * Next Steps:
- *  - introduce custom errors which capture backtraces !
- *  - fix the catch/unwrap issues in main() !
- *  - use unwind in a way where the stacktrace is useful !
+ *  - text insert:
+ *      - add new line, line copy, line break,
+ *      - add insert at x offset
+ *      - add replace at x offset
  *  - cursor horizontal memory
- *  - add text insert
- *      commands: new line, line copy, insert mode, append char
- *  - BUG mouse clicks are not correctly parsed
+ *  - better navigation
  *
  * General TODOs:
- *  - cleanup: open Enum::* locally !
- *  - import std stuff more locally
+ *  - introduce custom errors which capture backtraces !
+ *  - fix the catch/unwrap issues in main() !
  *  - handle resize
  *  - dir explorer
- *  - command mode pending input
  *  - think more about where to track the screen area:
  *      right now it is repeated both in Screen and in View
  *      ideally Screen would not be tracking it
@@ -546,7 +544,7 @@ impl Vek {
     }
 }
 
-impl fmt::Display for Vek {
+impl Display for Vek {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "({}, {})", self.x, self.y)
     }
@@ -657,8 +655,12 @@ struct Er {
     // TODO: add stacktrace
 }
 
+fn er<T>(err: io::Error) -> Re<T> {
+    Err(Er { err: Box::new(err) })
+}
 
-impl fmt::Display for Er {
+
+impl Display for Er {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.err.fmt(f)
     }
@@ -1363,7 +1365,7 @@ impl Editor {
 
 // TODO: associate this to a Buffer struct
 // TODO: probably I need to collapse all errors into strings, and create my own Result alias ...
-fn file_load(filename: &str) -> io::Result<Vec<u8>> {
+fn file_load(filename: &str) -> Re<Vec<u8>> {
     let fileinfo = fs::metadata(filename)?;
     let size = fileinfo.len() as usize;
 
@@ -1373,7 +1375,7 @@ fn file_load(filename: &str) -> io::Result<Vec<u8>> {
     let nread = f.read(&mut buf)?;
     if nread != size {
         // why so ugly ...
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "not read enough bytes")); // TODO: add number of bytes
+        return er(io::Error::new(io::ErrorKind::UnexpectedEof, "not read enough bytes"));
     }
 
     Ok(buf)
@@ -1381,9 +1383,9 @@ fn file_load(filename: &str) -> io::Result<Vec<u8>> {
 
 fn main() {
     // CLEANUP: get rid of nested unwrap !
-    //std::panic::catch_unwind(|| {
+    std::panic::catch_unwind(|| {
         Editor::run().unwrap();
-    //}).unwrap();
+    }).unwrap();
 }
 
 
@@ -1560,7 +1562,7 @@ fn read_input() -> Re<Input> {
 
     let v = vek(x,y);
 
-    let r = match c2 as i32 {
+    let r = match (c2 as i32) & 3 /* ignore modifier keys */ {
         0 ... 2 =>  Input::Click(v),
         3       =>  Input::ClickRelease(v),
         _       =>  Input::UnknownEscSeq,
