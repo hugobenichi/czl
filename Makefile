@@ -5,13 +5,14 @@ OUTDIR=build
 builddir:
 	mkdir -p $(OUTDIR)
 
-termlinux: builddir term.c
+$(OUTDIR)/term.o: builddir term.c
 	gcc -c term.c -o $(OUTDIR)/term.o
+
+termlinux: builddir $(OUTDIR)/term.o
 	ar -rcs $(OUTDIR)/libterm.a $(OUTDIR)/term.o
 
-termosx: builddir term.c
-	gcc -c term.c -o $(OUTDIR)/term.o
-	ar -r cs $(OUTDIR)/libterm.a $(OUTDIR)/term.o
+termosx: builddir $(OUTDIR)/term.o
+	ar rcs $(OUTDIR)/libterm.a $(OUTDIR)/term.o
 
 native: builddir $(OUTDIR)/libterm.a
 
