@@ -60,9 +60,11 @@ const CONF : Config = Config {
     color_footer:           Colorcell { fg: Color::White,   bg: Color::Gray(2) },
     color_lineno:           Colorcell { fg: Color::Green,   bg: Color::Gray(2) },
     color_console:          Colorcell { fg: Color::White,   bg: Color::Gray(16) },
+    color_cursor_lines:     Colorcell { fg: Color::Black,   bg: Color::Gray(6) },
+
     color_mode_command:     Colorcell { fg: Color::Gray(1), bg: Color::Black },
     color_mode_insert:      Colorcell { fg: Color::Gray(1), bg: Color::Red },
-    color_cursor_lines:     Colorcell { fg: Color::Black,   bg: Color::Gray(6) },
+    color_mode_exit:        Colorcell { fg: Color::Magenta, bg: Color::Magenta },
 };
 
 
@@ -78,9 +80,6 @@ struct Editor {
     footer:         Rec,
     framebuffer:    Framebuffer,
 
-    mode:           EditorMode,
-
-    running: bool,
     // TODO:
     //  list of open files and their filebuffers
     //  list of screens
@@ -113,13 +112,15 @@ struct Config {
     color_footer:           Colorcell,
     color_lineno:           Colorcell,
     color_console:          Colorcell,
+    color_cursor_lines:     Colorcell,
+
     color_mode_command:     Colorcell,
     color_mode_insert:      Colorcell,
-    color_cursor_lines:     Colorcell,
+    color_mode_exit:        Colorcell,
 }
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Vek { // Vec was already taken ...
     x: i32,
     y: i32,
@@ -198,31 +199,105 @@ enum MovementMode {
     Pages,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum EditorMode {
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Mode {
     Command,
     Insert,
+    Exit,
 }
 
 const MODE_COMMAND : &'static str = "Command";
 const MODE_INSERT  : &'static str = "Insert ";
+const MODE_EXIT    : &'static str = "Exit   ";
 
-impl EditorMode {
+impl Mode {
 
     fn footer_color(self) -> Colorcell {
-        use EditorMode::*;
+        use Mode::*;
         match self {
             Command =>  CONF.color_mode_command,
             Insert  =>  CONF.color_mode_insert,
+            Exit    =>  CONF.color_mode_exit,
         }
     }
 
     fn name(self) -> &'static str {
-        use EditorMode::*;
+        use Mode::*;
         match self {
             Command =>  MODE_COMMAND,
             Insert  =>  MODE_INSERT,
+            Exit    =>  MODE_EXIT,
         }
+    }
+
+    fn process_input(m: Mode, c: Input, e: &mut Editor) -> Re<Mode> {
+        use Mode::*;
+
+        log(&format!("input: {:?}", c));
+
+        if c == Input::Key(CTRL_C) {
+            return Ok(Exit)
+        }
+
+        let new_m = match m {
+            Command => Mode::process_command(c, e),
+            Insert  => Ok(Mode::process_insert(c, e)),
+            Exit    => panic!("cannot process input in Exit state"),
+        };
+
+        // TODO: update the view here regardless of the operation !
+        //  for instance delete line can force a cursor update
+        e.view.update(&e.buffer);
+
+        new_m
+    }
+
+    fn default_state() -> Mode {
+        Mode::Command
+    }
+
+    fn process_command(c: Input, e: &mut Editor) -> Re<Mode> {
+        use Input::*;
+
+        // TODO: more sophisticated cursor movement ...
+        match c {
+            Key('h')    => e.mv_cursor(Move::Left),
+            Key('j')    => e.mv_cursor(Move::Down),
+            Key('k')    => e.mv_cursor(Move::Up),
+            Key('l')    => e.mv_cursor(Move::Right),
+            Key('\t')   => return Ok(Mode::Insert),
+            Key('\\')   => Debugconsole::clear(),
+            Key('d')    => e.buffer.line_del(usize(e.view.cursor.y)),
+            Key('u')    => e.buffer.undo(),
+            Key('s')    => e.buffer.to_file(&format!("{}.tmp", e.view.filepath))?,
+
+            Key('b')
+//                        => panic!("BOOM !"),
+                        => return Err(From::from(io::Error::new(io::ErrorKind::UnexpectedEof, "boom !"))),
+
+            Key(CTRL_C) => return Ok(Mode::Exit),
+
+            // noop by default
+            _ => (),
+        }
+
+        Ok(Mode::Command)
+    }
+
+    fn process_insert(c: Input, e: &mut Editor) -> Mode {
+        use Input::*;
+        match c {
+            EscZ    => return Mode::Command,
+
+            Key(c) if is_printable(c) /* HACK */ || c == ENTER
+                        => e.buffer.append(c),
+
+            // TODO: treat ENTER separately
+
+            _ => (),
+        }
+
+        Mode::Insert
     }
 }
 
@@ -1191,7 +1266,6 @@ impl Editor {
 
         let window = Term::size();
         let framebuffer = Framebuffer::mk_framebuffer(window);
-        let running = true;
         let (mainscreen, footer) = window.rec().vsplit(window.y - 1);
         let view;
         {
@@ -1200,15 +1274,12 @@ impl Editor {
             let (_, textarea) = filearea.hsplit(5);
             view = View::mk_fileview(filename, textarea.size());
         }
-        let mode = EditorMode::Command;
 
         Ok(Editor {
             window,
             mainscreen,
             footer,
             framebuffer,
-            mode,
-            running,
             buffer,
             view,
         })
@@ -1219,21 +1290,24 @@ impl Editor {
 
         let mut e = Editor::mk_editor()?;
 
-        e.refresh_screen()?;
 
-        while e.running {
+        let mut m = Mode::default_state();
+        e.refresh_screen(&m)?;
+
+        while m != Mode::Exit {
             let c = read_input()?;
 
             let frame_time = Scopeclock::measure("last frame");     // caveat: displayed on next frame only
 
-            e.process_input(c)?;
-            e.refresh_screen()?;
+            m = Mode::process_input(m, c, &mut e)?;
+
+            e.refresh_screen(&m)?;
         }
 
         Ok(())
     }
 
-    fn refresh_screen(&mut self) -> Re<()> {
+    fn refresh_screen(&mut self, mode: &Mode) -> Re<()> {
         // main screen
         {
             let draw_time = Scopeclock::measure("draw");
@@ -1244,9 +1318,9 @@ impl Editor {
 
         // footer
         {
-            self.framebuffer.put_line(self.footer.min + vek(1,0), self.mode.name().as_bytes());
+            self.framebuffer.put_line(self.footer.min + vek(1,0), mode.name().as_bytes());
             self.framebuffer.put_line(self.footer.min + vek(10, 0), b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
-            self.framebuffer.put_color(self.footer, self.mode.footer_color());
+            self.framebuffer.put_color(self.footer, mode.footer_color());
         }
 
         // renter frame to terminal
@@ -1258,43 +1332,6 @@ impl Editor {
                 self.framebuffer.clear();
             }
         }
-
-        Ok(())
-    }
-
-    fn process_input(&mut self, c: Input) -> Re<()> {
-        log(&format!("input: {:?}", c));
-
-        // TODO: more sophisticated cursor movement ...
-        use Input::*;
-        match c {
-            Key('h')    => self.mv_cursor(Move::Left),
-            Key('j')    => self.mv_cursor(Move::Down),
-            Key('k')    => self.mv_cursor(Move::Up),
-            Key('l')    => self.mv_cursor(Move::Right),
-            Key('\t')   => self.switch_mode(),
-            Key('\\')   => Debugconsole::clear(),
-            Key('d')    => self.buffer.line_del(usize(self.view.cursor.y)),
-            Key('u')    => self.buffer.undo(),
-            Key('s')    => self.buffer.to_file(&format!("{}.tmp", self.view.filepath))?,
-
-            Key('b')
-//                        => panic!("BOOM !"),
-                        => return Err(From::from(io::Error::new(io::ErrorKind::UnexpectedEof, "boom !"))),
-
-            Key(CTRL_C) => self.running = false,
-
-            // TODO: move that to insert mode !!
-            Key(c) if is_printable(c) /* HACK */ || c == ENTER
-                        => self.buffer.append(c),
-
-            // noop by default
-            _ => (),
-        }
-
-        // TODO: update the view here regardless of the operation !
-        //  for instance delete line can force a cursor update
-        self.view.update(&self.buffer);
 
         Ok(())
     }
@@ -1311,15 +1348,6 @@ impl Editor {
 
         // TODO: update the 'desired cursor position' instead of the real cursor position
         self.view.cursor = self.view.cursor + delta;
-    }
-
-    fn switch_mode(&mut self) {
-        use EditorMode::*;
-        let newmode = match self.mode {
-            Command =>  EditorMode::Insert,
-            Insert  =>  EditorMode::Command,
-        };
-        self.mode = newmode;
     }
 
     fn resize(&mut self) {
@@ -1452,7 +1480,7 @@ const term_newline                    : &[u8] = b"\r\n";
 /* KEY INPUT HANDLING */
 
 // TODO: pretty print control codes
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Input {
     Noinput,
     Key(char),
