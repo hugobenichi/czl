@@ -250,10 +250,6 @@ impl Mode {
         new_m
     }
 
-    fn default_state() -> Mode {
-        Mode::Command
-    }
-
     fn process_command(c: Input, e: &mut Editor) -> Re<Mode> {
         use Input::*;
 
@@ -273,25 +269,21 @@ impl Mode {
 //                        => panic!("BOOM !"),
                         => return Err(From::from(io::Error::new(io::ErrorKind::UnexpectedEof, "boom !"))),
 
-            Key(CTRL_C) => return Ok(Mode::Exit),
-
-            // noop by default
             _ => (),
         }
 
         Ok(Mode::Command)
     }
 
+    // TODO: process_insert should only be called with a buffer in 'Edit' mode
+    // having a buffer in 'Edit' mode would allow for some by-design safe optimizations like
+    // BreakLine truncating the existing line, instead of relying on correctly mapping both sides
     fn process_insert(c: Input, e: &mut Editor) -> Mode {
         use Input::*;
         match c {
-            EscZ    => return Mode::Command,
-
-            Key(c) if is_printable(c) /* HACK */ || c == ENTER
-                        => e.buffer.append(c),
-
-            // TODO: treat ENTER separately
-
+            Key(ESC) | EscZ => return Mode::Command,
+            Key(ENTER)      => e.buffer.command(BufferCommand::BreakLine(e.view.cursor)),
+            Key(c)          => e.buffer.command(BufferCommand::Append(e.view.cursor, c)),
             _ => (),
         }
 
@@ -368,6 +360,8 @@ enum BufferOps {
 
 enum BufferCommand {
     DelLine(usize),
+    NewLine(usize),
+    BreakLine(Vek),
     Append(Vek, char),
     Undo,
     Redo,
@@ -1199,21 +1193,23 @@ impl Textbuffer {
     // TODO: this need to support on-going append in the middle of a line !
     //       todo that, add three parameters
     //          the type of insert (insert(x_pos), append, replace(x_pos))
-    fn append(&mut self, c: char) -> Option<usize> {
-        // TODO: don't handle ENTER here, instead catch it in the Insert mode toplvl handler and
-        // map it to line operations based on the cursor position
-        if c == ENTER {
-            let start = self.text.len();
-            let stop = start;
-            self.lines.push(Line { start, stop });
-
-            return Some(self.lines.len() - 1);
+    fn append(&mut self, c: char) {
+        if !is_printable(c) {
+            return
         }
 
         self.text.push(c as u8);
         self.lines.last_mut().unwrap().stop += 1;
 
-        None
+        // TODO update cursor
+    }
+
+    fn emptyline(&mut self) -> usize {
+        let start = self.text.len();
+        let stop = start;
+        self.lines.push(Line { start, stop });
+
+        self.lines.len() - 1
     }
 }
 
@@ -1238,19 +1234,18 @@ impl Buffer {
         }
     }
 
-    fn append(&mut self, c: char) {
-        match self.textbuffer.append(c) {
-            Some(newline)   => self.current_snapshot.line_indexes.push(newline),
-            None            => ()
-        }
-    }
-
+    // TODO: break into Edit mode commands and Normal mode commands
     fn command(&mut self, command: BufferCommand) {
         use BufferCommand::*;
         match command {
             DelLine(lineno) => self.line_del(lineno),
 
-            Append(cursor, c) => self.append(c), // TODO: take into account cursor
+            BreakLine(_) |
+            NewLine(_) =>
+                // TODO: use lineno !
+                self.current_snapshot.line_indexes.push(self.textbuffer.emptyline()),
+
+            Append(cursor, c) => self.textbuffer.append(c), // TODO: take into account cursor
 
             Undo    => self.undo(),
 
@@ -1293,7 +1288,7 @@ impl Editor {
         let mut e = Editor::mk_editor()?;
 
 
-        let mut m = Mode::default_state();
+        let mut m = Mode::Command;
         e.refresh_screen(&m)?;
 
         while m != Mode::Exit {
