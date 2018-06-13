@@ -204,6 +204,7 @@ enum Mode {
     Exit,
 }
 
+// Left justified, fixed length strings.
 const MODE_COMMAND : &'static str = "Command";
 const MODE_INSERT  : &'static str = "Insert ";
 const MODE_EXIT    : &'static str = "Exit   ";
@@ -259,15 +260,20 @@ impl Mode {
             Key('j')    => e.mv_cursor(Move::Down),
             Key('k')    => e.mv_cursor(Move::Up),
             Key('l')    => e.mv_cursor(Move::Right),
-            Key('\t')   => return Ok(Mode::Insert),
+            Key('\t')   => {
+                e.buffer.view_op(BufferViewOp::Insert);
+                return Ok(Mode::Insert);
+            }
             Key('\\')   => Debugconsole::clear(),
+                            // TODO: convert to BufferViewOp
             Key('d')    => e.buffer.line_del(usize(e.view.cursor.y)),
             Key('u')    => e.buffer.undo(),
+            Key('o')    => e.buffer.view_op(BufferViewOp::NewLine(usize(e.view.cursor.y))),
             Key('s')    => e.buffer.to_file(&format!("{}.tmp", e.view.filepath))?,
 
-            Key('b')
+//            Key('b')
 //                        => panic!("BOOM !"),
-                        => return Err(From::from(io::Error::new(io::ErrorKind::UnexpectedEof, "boom !"))),
+//                        => return Err(From::from(io::Error::new(io::ErrorKind::UnexpectedEof, "boom !"))),
 
             _ => (),
         }
@@ -281,9 +287,12 @@ impl Mode {
     fn process_insert(c: Input, e: &mut Editor) -> Mode {
         use Input::*;
         match c {
-            Key(ESC) | EscZ => return Mode::Command,
-            Key(ENTER)      => e.buffer.command(BufferCommand::BreakLine(e.view.cursor)),
-            Key(c)          => e.buffer.command(BufferCommand::Append(e.view.cursor, c)),
+            Key(ESC) | EscZ => {
+                e.buffer.insert_op(BufferInsertOp::View);
+                return Mode::Command;
+            }
+            Key(ENTER)      => e.buffer.insert_op(BufferInsertOp::BreakLine(e.view.cursor)),
+            Key(c)          => e.buffer.insert_op(BufferInsertOp::Append(e.view.cursor, c)),
             _ => (),
         }
 
@@ -344,6 +353,7 @@ struct Buffer {
     textbuffer:             Textbuffer,
     previous_snapshots:     Vec<Textsnapshot>,
     current_snapshot:       Textsnapshot,
+    state:                  BufferState,
 }
 
 // A pair of offsets into a buffer for delimiting lines.
@@ -353,22 +363,24 @@ struct Line {
     stop:   usize,      // exclusive
 }
 
-enum BufferOps {
-    Delete(usize),
-    Insert(usize),
-}
-
-enum BufferCommand {
+enum BufferViewOp {
     DelLine(usize),
     NewLine(usize),
-    BreakLine(Vek),
-    Append(Vek, char),
     Undo,
     Redo,
+    Insert,
 }
 
+enum BufferInsertOp {
+    BreakLine(Vek),
+    Append(Vek, char),
+    View,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum BufferState {
     Viewing,
+    PendingInsert,
     Inserting,
 }
 
@@ -1156,6 +1168,7 @@ impl Buffer {
             textbuffer:         Textbuffer { text, lines },
             previous_snapshots: Vec::new(),
             current_snapshot:   Textsnapshot { line_indexes },
+            state:              BufferState::Viewing,
         }
     }
 
@@ -1215,13 +1228,15 @@ impl Textbuffer {
 
 // Buffer ops
 impl Buffer {
-
-    fn line_del(&mut self, y: usize) {
-        assert!(y < self.current_snapshot.line_indexes.len());
-
+    fn snapshot(&mut self) {
         let next_snapshot = self.current_snapshot.clone();
         let prev_snapshot = replace(&mut self.current_snapshot, next_snapshot);
         self.previous_snapshots.push(prev_snapshot);
+    }
+
+    fn line_del(&mut self, y: usize) {
+        assert!(y < self.current_snapshot.line_indexes.len());
+        self.snapshot();
         self.current_snapshot.line_indexes.remove(y);
     }
 
@@ -1234,22 +1249,55 @@ impl Buffer {
         }
     }
 
-    // TODO: break into Edit mode commands and Normal mode commands
-    fn command(&mut self, command: BufferCommand) {
-        use BufferCommand::*;
-        match command {
+    fn view_op(&mut self, op: BufferViewOp) {
+        //assert_eq!(BufferState::Viewing, self.state);
+
+        use BufferViewOp::*;
+        match op {
             DelLine(lineno) => self.line_del(lineno),
 
-            BreakLine(_) |
-            NewLine(_) =>
-                // TODO: use lineno !
-                self.current_snapshot.line_indexes.push(self.textbuffer.emptyline()),
+            NewLine(lineno) => {
+                self.snapshot();
 
-            Append(cursor, c) => self.textbuffer.append(c), // TODO: take into account cursor
+                //let lastline = self.current_snapshot.line_indexes.len();
+                //self.current_snapshot.line_indexes.reserve(1);
+                //for i in (lineno..lastline).rev() {
+                //    self.current_snapshot.line_indexes[i+1] = self.current_snapshot.line_indexes[i];
+                //}
+
+                self.current_snapshot.line_indexes[lineno] = self.textbuffer.emptyline();
+            },
 
             Undo    => self.undo(),
 
-            Redo    => ()
+            Redo    => (),
+
+            Insert  => self.state = BufferState::PendingInsert,
+        }
+    }
+
+    fn insert_op(&mut self, op: BufferInsertOp) {
+        use BufferState::*;
+        match self.state {
+            Viewing         => (), //panic!("expected PendingInsert or Inserting mode"),
+            PendingInsert   => {
+                self.snapshot();
+                self.state = Inserting;
+            }
+            Inserting       => (),
+        }
+
+        // TODO: take a snapshot on first op if not taken yet
+        use BufferInsertOp::*;
+        match op {
+            BreakLine(cursor) =>
+                self.current_snapshot.line_indexes.push(self.textbuffer.emptyline()),
+
+            Append(cursor, c) =>
+                self.textbuffer.append(c), // TODO: take into account cursor
+
+            View =>
+                self.state = BufferState::Viewing,
         }
     }
 }
