@@ -2,6 +2,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
+#![allow(unused_macros)]
 
 
 use std::cmp::max;
@@ -15,6 +16,22 @@ use std::io;
 use std::mem::replace;
 
 
+macro_rules! check {
+    ($test:expr, $cause:expr) => {
+        assert!($test, format!("{}:{} cause: {}", file!(), line!(), $cause))
+    };
+    ($test:expr) => {
+        check!($test, "unknown")
+    };
+}
+
+macro_rules! er {
+    ($cause: expr) => {
+        Err(Er { descr: format!("{}:{} cause: {}", file!(), line!(), $cause) })
+    };
+}
+
+
 /*
  * Next Steps:
  *  - text insert:
@@ -25,7 +42,6 @@ use std::mem::replace;
  *  - better navigation
  *
  * General TODOs:
- *  - introduce custom errors which capture backtraces !
  *  - fix the catch/unwrap issues in main() !
  *  - handle resize
  *  - dir explorer
@@ -35,6 +51,7 @@ use std::mem::replace;
  *  - utf8 support: Line and Filebuffer, Input, ... don't wait too much
  *  - fix the non-statically linked term lib
  */
+
 
 
 // Global constant that controls a bunch of options.
@@ -273,7 +290,7 @@ impl Mode {
 
 //            Key('b')
 //                        => panic!("BOOM !"),
-//                        => return Err(From::from(io::Error::new(io::ErrorKind::UnexpectedEof, "boom !"))),
+//                        => return er!("BOOM !"),
 
             _ => (),
         }
@@ -496,21 +513,21 @@ impl Rec {
     fn size(self) -> Vek { vek(self.w(), self.h()) }
 
     fn row(self, y: i32) -> Rec {
-        assert!(self.min.y <= y);
-        assert!(y <= self.max.y);
+        check!(self.min.y <= y, "row was out of bounds (left)");
+        check!(y <= self.max.y, "row was out of bounds (right)");
         rec(self.min.x, y, self.max.x, y + 1)
     }
 
     fn column(self, x: i32) -> Rec {
-        assert!(self.min.x <= x);
-        assert!(x <= self.max.x);
+        check!(self.min.x <= x, "column was out of bounds (top)");
+        check!(x <= self.max.x, "column was out of bounds (bottom)");
         rec(x, self.min.y, x + 1, self.max.y)
     }
 
     // TODO: should x be forbidden from matching the bounds (i.e no empty output)
     fn hsplit(self, x: i32) -> (Rec, Rec) {
-        assert!(self.min.x <= x);
-        assert!(x < self.max.x);
+        check!(self.min.x <= x);
+        check!(x < self.max.x);
 
         let left = rec(self.min.x, self.min.y, x, self.max.y);
         let right = rec(x, self.min.y, self.max.x, self.max.y);
@@ -519,8 +536,8 @@ impl Rec {
     }
 
     fn vsplit(self, y: i32) -> (Rec, Rec) {
-        assert!(self.min.y <= y);
-        assert!(y < self.max.y);
+        check!(self.min.y <= y);
+        check!(y < self.max.y);
 
         let up = rec(self.min.x, self.min.y, self.max.x, y);
         let down = rec(self.min.x, y, self.max.x, self.max.y);
@@ -657,30 +674,25 @@ type Re<T> = Result<T, Er>;
 
 #[derive(Debug)]
 struct Er {
-    err: Box<std::error::Error>,
-    // TODO: add stacktrace
+    descr: String,
 }
-
-fn er<T>(err: io::Error) -> Re<T> {
-    Err(Er { err: Box::new(err) })
-}
-
 
 impl Display for Er {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.err.fmt(f)
+        f.write_str(&self.descr)
     }
 }
 
 impl std::error::Error for Er {
     fn description(&self) -> &str {
-        self.err.description()
+        &self.descr
     }
 }
 
 impl From<io::Error> for Er {
     fn from(err: io::Error) -> Er {
-        Er { err: Box::new(err) }
+        use std::error::Error;
+        Er { descr: format!("{}:?? cause: {}", file!(), err.description()) }
     }
 }
 
@@ -832,7 +844,7 @@ impl Framebuffer {
     }
 
     fn put_line(&mut self, pos: Vek, src: &[u8]) {
-        assert!(self.window.rec().contains(pos));
+        check!(self.window.rec().contains(pos));
 
         let maxlen = (self.window.x - pos.x) as usize;
         let len = min(src.len(), maxlen);
@@ -846,10 +858,10 @@ impl Framebuffer {
     // area.min is inclusive, area.max is exclusive
     fn put_color(&mut self, area: Rec, colors: Colorcell) {
         if CONF.debug_bounds {
-            assert!(0 <= area.x0());
-            assert!(0 <= area.y0());
-            assert!(area.x1() <= self.window.x);
-            assert!(area.y1() <= self.window.y);
+            check!(0 <= area.x0());
+            check!(0 <= area.y0());
+            check!(area.x1() <= self.window.x);
+            check!(area.y1() <= self.window.y);
         }
 
         let y0 = max(0, area.y0());
@@ -946,7 +958,7 @@ impl Framebuffer {
             let n = handle.write(&buffer)?;
             handle.flush()?;
 
-            assert_eq!(n, buffer.len());
+            check!(n == buffer.len());
         }
 
         // Put back buffer in place for reuse
@@ -1235,7 +1247,7 @@ impl Buffer {
     }
 
     fn line_del(&mut self, y: usize) {
-        assert!(y < self.current_snapshot.line_indexes.len());
+        check!(y < self.current_snapshot.line_indexes.len());
         self.snapshot();
         self.current_snapshot.line_indexes.remove(y);
     }
@@ -1250,7 +1262,7 @@ impl Buffer {
     }
 
     fn view_op(&mut self, op: BufferViewOp) {
-        //assert_eq!(BufferState::Viewing, self.state);
+        check!(BufferState::Viewing == self.state);
 
         use BufferViewOp::*;
         match op {
@@ -1279,7 +1291,7 @@ impl Buffer {
     fn insert_op(&mut self, op: BufferInsertOp) {
         use BufferState::*;
         match self.state {
-            Viewing         => (), //panic!("expected PendingInsert or Inserting mode"),
+            Viewing         => panic!("expected PendingInsert or Inserting mode"),
             PendingInsert   => {
                 self.snapshot();
                 self.state = Inserting;
@@ -1417,18 +1429,56 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
 
     let nread = f.read(&mut buf)?;
     if nread != size {
-        // why so ugly ...
-        return er(io::Error::new(io::ErrorKind::UnexpectedEof, "not read enough bytes"));
+        return er!("not enough bytes");
     }
 
     Ok(buf)
 }
 
 fn main() {
-    // CLEANUP: get rid of nested unwrap !
-    std::panic::catch_unwind(|| {
-        Editor::run().unwrap();
-    }).unwrap();
+    // no backtrace ??
+    //main1();
+    //main2();
+    //main3();
+    //main4();
+
+    // produce a useless backtrace that does not point to the panic source ...
+    main5();
+    //main6();
+}
+
+fn main1() {
+    match std::panic::catch_unwind(|| Editor::run()) {
+        Ok(Ok(()))      => (),
+        Ok(Err(cause))  => eprintln!("error: {:?}", cause),
+        Err(cause)      => eprintln!("panic: {:?}", cause),
+    }
+}
+
+fn main2() {
+    match std::panic::catch_unwind(|| { Editor::run().unwrap(); }) {
+        Ok(())      => (),
+        Err(cause)  => eprintln!("panic: {:?}", cause),
+    }
+}
+
+fn main3() {
+    match Editor::run() {
+        Ok(())      => (),
+        Err(cause)  => eprintln!("error: {:?}", cause),
+    }
+}
+
+fn main4() {
+    Editor::run().unwrap();
+}
+
+fn main5() {
+    std::panic::catch_unwind(|| { Editor::run() }).unwrap().unwrap();
+}
+
+fn main6() {
+    std::panic::catch_unwind(|| { Editor::run().unwrap() }).unwrap();
 }
 
 
@@ -1583,7 +1633,7 @@ fn read_input() -> Re<Input> {
     }
 
     // Escape sequence
-    assert_eq!(read_char()?, '[');
+    check!(read_char()? == '[');
 
     match read_char()? {
         'M' =>  (), // Mouse click, handled below
