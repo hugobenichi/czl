@@ -36,7 +36,7 @@ macro_rules! er {
 /*
  * Next Steps:
  *  - text insert:
- *      - add new line, line copy, line break,
+ *      - line copy, line break,
  *      - add insert at x offset
  *      - add replace at x offset
  *  - cursor horizontal memory
@@ -1271,11 +1271,11 @@ impl Buffer {
             NewLine(lineno) => {
                 self.snapshot();
 
-                //let lastline = self.current_snapshot.line_indexes.len();
-                //self.current_snapshot.line_indexes.reserve(1);
-                //for i in (lineno..lastline).rev() {
-                //    self.current_snapshot.line_indexes[i+1] = self.current_snapshot.line_indexes[i];
-                //}
+                let lastline = self.current_snapshot.line_indexes.len() - 1;
+                self.current_snapshot.line_indexes.reserve(1);
+                for i in (lineno..lastline).rev() {
+                    self.current_snapshot.line_indexes[i+1] = self.current_snapshot.line_indexes[i];
+                }
 
                 self.current_snapshot.line_indexes[lineno] = self.textbuffer.emptyline();
             },
