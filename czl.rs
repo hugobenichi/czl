@@ -10,6 +10,7 @@ use std::cmp::min;
 use std::fmt::Display;
 use std::fmt;
 use std::fs;
+use std::fs::File;
 use std::io::Read;
 use std::io::Write;
 use std::io;
@@ -288,8 +289,8 @@ impl Mode {
             Key('o')    => e.buffer.view_op(BufferViewOp::NewLine(usize(e.view.cursor.y))),
             Key('s')    => e.buffer.to_file(&format!("{}.tmp", e.view.filepath))?,
 
-//            Key('b')
-//                        => panic!("BOOM !"),
+            Key('b')
+                        => panic!("BOOM !"),
 //                        => return er!("BOOM !"),
 
             _ => (),
@@ -1186,7 +1187,7 @@ impl Buffer {
 
     // TODO: propagate errors
     fn to_file(&self, path: &str) -> Re<()> {
-        let mut f = fs::File::create(path)?;
+        let mut f = File::create(path)?;
 
         for i in 0..self.nlines() {
             f.write_all(self.get_line(vek(0,i)))?;
@@ -1343,12 +1344,9 @@ impl Editor {
     }
 
     fn run() -> Re<()> {
-        let term = Term::set_raw()?;
-
         let mut e = Editor::mk_editor()?;
-
-
         let mut m = Mode::Command;
+
         e.refresh_screen(&m)?;
 
         while m != Mode::Exit {
@@ -1425,7 +1423,7 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
     let size = fileinfo.len() as usize;
 
     let mut buf = vec![0; size];
-    let mut f = fs::File::open(filename)?;
+    let mut f = File::open(filename)?;
 
     let nread = f.read(&mut buf)?;
     if nread != size {
@@ -1436,49 +1434,9 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
 }
 
 fn main() {
-    // no backtrace ??
-    //main1();
-    //main2();
-    //main3();
-    main4();
+    let term = Term::set_raw().unwrap();
 
-    // produce a useless backtrace that does not point to the panic source ...
-    //main5();
-    //main6();
-}
-
-fn main1() {
-    match std::panic::catch_unwind(|| Editor::run()) {
-        Ok(Ok(()))      => (),
-        Ok(Err(cause))  => eprintln!("error: {:?}", cause),
-        Err(cause)      => eprintln!("panic: {:?}", cause),
-    }
-}
-
-fn main2() {
-    match std::panic::catch_unwind(|| { Editor::run().unwrap(); }) {
-        Ok(())      => (),
-        Err(cause)  => eprintln!("panic: {:?}", cause),
-    }
-}
-
-fn main3() {
-    match Editor::run() {
-        Ok(())      => (),
-        Err(cause)  => eprintln!("error: {:?}", cause),
-    }
-}
-
-fn main4() {
     Editor::run().unwrap();
-}
-
-fn main5() {
-    std::panic::catch_unwind(|| { Editor::run() }).unwrap().unwrap();
-}
-
-fn main6() {
-    std::panic::catch_unwind(|| { Editor::run().unwrap() }).unwrap();
 }
 
 
@@ -1498,23 +1456,12 @@ extern "C" {
     fn terminal_get_size() -> TermWinsize;
     fn terminal_restore();
     fn terminal_set_raw() -> i32;
-    fn swap_stderr() -> i32;
-}
-
-fn stderr_pimping() -> fs::File {
-    use std::os::unix::io::FromRawFd;
-    let file;
-
-    unsafe {
-        let fd = swap_stderr();
-        file = fs::File::from_raw_fd(fd);
-    }
-
-    return file;
+    fn pipe_stderr() -> i32;
 }
 
 // Empty object used to safely control terminal raw mode and properly exit raw mode at scope exit.
 struct Term {
+    stderr: File,
 }
 
 impl Term {
@@ -1540,7 +1487,13 @@ impl Term {
             }
         }
 
-        Ok(Term { })
+        use std::os::unix::io::FromRawFd;
+        let stderr;
+        unsafe {
+            stderr = File::from_raw_fd(pipe_stderr());
+        }
+
+        Ok(Term { stderr })
     }
 }
 
@@ -1560,6 +1513,15 @@ impl Drop for Term {
 
         unsafe {
             terminal_restore();
+        }
+
+        use io::BufRead;
+
+        // TODO: this hangs on EoF not coming
+        // do instead non-blocking read until no more byte to read.
+        let reader = io::BufReader::new(&self.stderr);
+        for line in reader.lines() {
+            println!("{}", line.unwrap());
         }
     }
 }
