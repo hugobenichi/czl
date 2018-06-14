@@ -43,7 +43,6 @@ macro_rules! er {
  *  - better navigation
  *
  * General TODOs:
- *  - fix the catch/unwrap issues in main() !
  *  - handle resize
  *  - dir explorer
  *  - think more about where to track the screen area:
@@ -1433,6 +1432,7 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
     Ok(buf)
 }
 
+
 fn main() {
     let term = Term::set_raw().unwrap();
 
@@ -1456,12 +1456,19 @@ extern "C" {
     fn terminal_get_size() -> TermWinsize;
     fn terminal_restore();
     fn terminal_set_raw() -> i32;
-    fn pipe_stderr() -> i32;
 }
+
+// Global variable for ensuring terminal restore happens once exactly.
+static mut is_raw : bool = false;
 
 // Empty object used to safely control terminal raw mode and properly exit raw mode at scope exit.
 struct Term {
-    stderr: File,
+}
+
+impl Drop for Term {
+    fn drop(&mut self) {
+        Term::restore();
+    }
 }
 
 impl Term {
@@ -1484,21 +1491,26 @@ impl Term {
 
             unsafe {
                 let _ = terminal_set_raw();
+                is_raw = true;
+            }
+
+            // Ensure terminal is restored to default whenever a panic happens.
+            let std_panic_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |panicinfo| {
+                Term::restore();
+                std_panic_hook(panicinfo);
+            }));
+        }
+
+        Ok(Term { })
+    }
+
+    fn restore() {
+        unsafe {
+            if !is_raw {
+                return
             }
         }
-
-        use std::os::unix::io::FromRawFd;
-        let stderr;
-        unsafe {
-            stderr = File::from_raw_fd(pipe_stderr());
-        }
-
-        Ok(Term { stderr })
-    }
-}
-
-impl Drop for Term {
-    fn drop(&mut self) {
         if CONF.no_raw_mode {
             return
         }
@@ -1513,15 +1525,7 @@ impl Drop for Term {
 
         unsafe {
             terminal_restore();
-        }
-
-        use io::BufRead;
-
-        // TODO: this hangs on EoF not coming
-        // do instead non-blocking read until no more byte to read.
-        let reader = io::BufReader::new(&self.stderr);
-        for line in reader.lines() {
-            println!("{}", line.unwrap());
+            is_raw = false;
         }
     }
 }
