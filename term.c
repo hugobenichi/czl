@@ -45,3 +45,24 @@ int terminal_set_raw()
 
 	return tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_raw);
 }
+
+int swap_stderr(int fd) {
+	int pipefds[2];
+
+	int z;
+
+	z = pipe(pipefds);
+        if (z < 0) {
+		return z;
+	}
+
+	int read_end  = pipefds[0];
+	int write_end = pipefds[1];
+
+	z = dup2(STDERR_FILENO, write_end);
+        if (z < 0) {
+		return z;
+	}
+
+	return read_end;
+}

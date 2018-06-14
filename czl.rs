@@ -1440,10 +1440,10 @@ fn main() {
     //main1();
     //main2();
     //main3();
-    //main4();
+    main4();
 
     // produce a useless backtrace that does not point to the panic source ...
-    main5();
+    //main5();
     //main6();
 }
 
@@ -1498,6 +1498,19 @@ extern "C" {
     fn terminal_get_size() -> TermWinsize;
     fn terminal_restore();
     fn terminal_set_raw() -> i32;
+    fn swap_stderr() -> i32;
+}
+
+fn stderr_pimping() -> fs::File {
+    use std::os::unix::io::FromRawFd;
+    let file;
+
+    unsafe {
+        let fd = swap_stderr();
+        file = fs::File::from_raw_fd(fd);
+    }
+
+    return file;
 }
 
 // Empty object used to safely control terminal raw mode and properly exit raw mode at scope exit.
