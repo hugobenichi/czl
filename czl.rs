@@ -33,6 +33,90 @@ macro_rules! er {
 }
 
 
+
+
+
+// EXPERIMENT - BEGIN
+// this is an experiment of principle with the architecture I want to try with Rust
+// in short I have a top level Mode type that drives the input processing
+// that mode deleguates to deleguate to specific implementations which owns the buffer
+// in specific cases.
+// benefits is type safety of matching the exact input parsing to the exact impl applying
+// the operations, and type safety around cleanups entering and leaving various states.
+
+#[derive(Debug)]
+struct I { }
+
+#[derive(Debug)]
+struct E {
+    data: Vec<u8>,
+}
+
+struct EM1<'a> {
+    e: &'a mut E,
+}
+
+struct EM2<'a> {
+    e: &'a mut E,
+}
+
+#[derive(Debug)]
+enum M {
+    M1,
+    M2,
+}
+
+impl M {
+    fn handle(&self, i: I, e: &mut E) -> M {
+        match self {
+            M::M1 => {
+                let mut em1 = EM1 { e };
+                // i can be remapped here through a dynamically populated table
+                em1.handle(i)
+            }
+            M::M2 => {
+                let mut em2 = EM1 { e };
+                // i can be remapped here through a dynamically populated table
+                em2.handle(i)
+            }
+        }
+    }
+}
+
+impl<'a> EM1<'a> {
+    fn handle(&mut self, i: I) -> M {
+        println!("m1: {:?}", self.e);
+
+        // Load a command from the table for that M1
+        //      -> table is dynamically populated from config
+        // apply the command on the data
+
+        M::M2
+    }
+}
+
+impl<'a> EM2<'a> {
+    fn handle(&mut self, i: I) -> M {
+        println!("m1: {:?}", self.e);
+
+        M::M1
+    }
+}
+
+struct EM {
+    e: E,
+    m: M,
+}
+
+impl EM {
+    fn process(m: M, e: &mut E, i: I) -> M {
+       m.handle(i, e)
+    }
+}
+
+// EXPERIMENT - END
+
+
 /*
  * Next Steps:
  *  - text insert:
@@ -247,14 +331,15 @@ impl Mode {
     }
 
     fn process_input(m: Mode, c: Input, e: &mut Editor) -> Re<Mode> {
-        use Mode::*;
-
         log(&format!("input: {:?}", c));
 
         if c == Input::Key(CTRL_C) {
             return Ok(Exit)
         }
 
+        // TODO: return a command from the current mode
+        //       then apply the transformation
+        use Mode::*;
         let new_m = match m {
             Command => Mode::process_command(c, e),
             Insert  => Ok(Mode::process_insert(c, e)),
@@ -277,20 +362,24 @@ impl Mode {
             Key('j')    => e.mv_cursor(Move::Down),
             Key('k')    => e.mv_cursor(Move::Up),
             Key('l')    => e.mv_cursor(Move::Right),
+
+            Key('\\')   => Debugconsole::clear(),
+
+            Key('d')    => e.buffer.view_op(BufferViewOp::DelLine(usize(e.view.cursor.y))),
+            Key('u')    => e.buffer.view_op(BufferViewOp::Undo),
+            Key('o')    => e.buffer.view_op(BufferViewOp::NewLine(usize(e.view.cursor.y))),
             Key('\t')   => {
                 e.buffer.view_op(BufferViewOp::Insert);
                 return Ok(Mode::Insert);
             }
-            Key('\\')   => Debugconsole::clear(),
-                            // TODO: convert to BufferViewOp
-            Key('d')    => e.buffer.line_del(usize(e.view.cursor.y)),
-            Key('u')    => e.buffer.undo(),
-            Key('o')    => e.buffer.view_op(BufferViewOp::NewLine(usize(e.view.cursor.y))),
+
             Key('s')    => e.buffer.to_file(&format!("{}.tmp", e.view.filepath))?,
 
             Key('b')
                         => panic!("BOOM !"),
 //                        => return er!("BOOM !"),
+
+            // TODO: handle mouse click
 
             _ => (),
         }
@@ -380,12 +469,21 @@ struct Line {
     stop:   usize,      // exclusive
 }
 
+struct BufferView<'a> {
+    buffer: &'a mut Buffer,
+}
+
+struct BufferInsert<'a> {
+    buffer: &'a mut Buffer,
+    no_insert_yet: bool,
+}
+
 enum BufferViewOp {
     DelLine(usize),
     NewLine(usize),
     Undo,
     Redo,
-    Insert,
+    Insert, // CLEANUP: delete once migrated to BufferView wrapper
 }
 
 enum BufferInsertOp {
@@ -1314,6 +1412,57 @@ impl Buffer {
     }
 }
 
+impl <'a> BufferView<'a> {
+    fn op(&mut self, op: BufferViewOp) {
+        use BufferViewOp::*;
+        match op {
+            DelLine(lineno) => {
+                self.buffer.snapshot();
+                self.buffer.line_del(lineno);
+            }
+
+            NewLine(lineno) => {
+                self.buffer.snapshot();
+
+                let lastline = self.buffer.current_snapshot.line_indexes.len() - 1;
+                self.buffer.current_snapshot.line_indexes.reserve(1);
+                for i in (lineno..lastline).rev() {
+                    self.buffer.current_snapshot.line_indexes[i+1] = self.buffer.current_snapshot.line_indexes[i];
+                }
+
+                self.buffer.current_snapshot.line_indexes[lineno] = self.buffer.textbuffer.emptyline();
+            },
+
+            Undo    => self.buffer.undo(), // TODO: implement redo stack
+
+            Redo    => (), // TODO !
+
+            Insert  => (), // CLEANUP: delete me once migrated to BufferView
+        }
+    }
+}
+
+impl <'a> BufferInsert<'a> {
+    fn op(&mut self, op: BufferInsertOp) {
+        use BufferState::*;
+
+        if !self.no_insert_yet {
+            self.buffer.snapshot();
+            self.no_insert_yet = true;
+        }
+
+        use BufferInsertOp::*;
+        match op {
+            BreakLine(cursor) =>
+                self.buffer.current_snapshot.line_indexes.push(self.buffer.textbuffer.emptyline()),
+
+            Append(cursor, c) =>
+                self.buffer.textbuffer.append(c), // TODO: take into account cursor
+
+            View => (), // CLEANUP: delete me once migrated to BufferInsert
+        }
+    }
+}
 
 impl Editor {
 
