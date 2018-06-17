@@ -1,4 +1,5 @@
 #include <termios.h>
+#include <errno.h>
 #include <unistd.h>
 
 #include <sys/ioctl.h>
@@ -44,4 +45,27 @@ int terminal_set_raw()
 	termios_raw.c_cflag |= CS8;                        // 8 bits chars
 
 	return tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_raw);
+}
+
+static const int RESIZE = 0xff;
+
+int read_1B()
+{
+	char c;
+
+	int n = 0;
+	while (n == 0) {
+		n = read(STDIN_FILENO, &c, 1);
+	}
+
+	// Terminal resize events send SIGWINCH signals which interrupt read()
+	if (n < 0 && errno == EINTR) {
+		return RESIZE;
+	}
+
+	if (n < 0) {
+		return -errno;
+	}
+
+	return c;
 }

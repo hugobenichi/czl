@@ -51,7 +51,6 @@ macro_rules! er {
  *      right now it is repeated both in Screen and in View
  *      ideally Screen would not be tracking it
  *  - utf8 support: Line and Filebuffer, Input, ... don't wait too much
- *  - fix the non-statically linked term lib
  */
 
 
@@ -264,6 +263,11 @@ impl Mode {
     fn process_input(m: Mode, i: Input, e: &mut Editor) -> Re<Mode> {
         if i == Input::Key(CTRL_C) {
             return Ok(Exit)
+        }
+
+        if i == Input::Resize {
+            log("resize !");
+            return Ok(m)
         }
 
         use Mode::*;
@@ -1481,12 +1485,12 @@ struct TermWinsize {
     ws_ypixel: u16,
 }
 
-// BUG: this appears to not be correctly linked statically ...
 #[link(name = "term", kind = "static")]
 extern "C" {
     fn terminal_get_size() -> TermWinsize;
     fn terminal_restore();
     fn terminal_set_raw() -> i32;
+    fn read_1B() -> i32;
 }
 
 // Global variable for ensuring terminal restore happens once exactly.
@@ -1614,32 +1618,52 @@ const CTRL_Z    : char = 26 as char;
 const ESC       : char = 27 as char;      // also ctrl + [
 const BACKSPACE : char = 127 as char;
 
+const RESIZE    : char = 255 as char; //'\xff';
+
 
 fn is_printable(c : char) -> bool {
     ESC < c && c < BACKSPACE
 }
 
-fn read_char() -> Result<char, io::Error> {
-    let mut stdin = io::stdin();
-    let mut buf = [0;1];
-    // TODO: handle interrupts when errno == EINTR
-    // TODO: support unicode !
-    loop {
-        let n = stdin.read(&mut buf)?;
-        if n == 1 {
-            break;
-        }
-        // otherwise, it's a timeout => retry
+//fn read_char() -> Result<char, io::Error> {
+//    let mut stdin = io::stdin();
+//    let mut buf = [0;1];
+//    // TODO: handle interrupts when errno == EINTR
+//    // TODO: support unicode !
+//    loop {
+//        let n = stdin.read(&mut buf)?;
+//        if n == 1 {
+//            break;
+//        }
+//        // otherwise, it's a timeout => retry
+//    }
+//
+//    Ok(buf[0] as char)
+//}
+
+fn read_char() -> Re<char> {
+    let c;
+    unsafe {
+        c = read_1B();
+    }
+    if c < 0 {
+        return er!(format!("error reading char ! errno={}", -c));
     }
 
-    Ok(buf[0] as char)
+    Ok(c as u8 as char)
 }
 
 fn read_input() -> Re<Input> {
+    use Input::*;
+
     let c = read_char()?;
 
+    if c == RESIZE {
+        return Ok(Resize);
+    }
+
     if c != ESC {
-        return Ok(Input::Key(c))
+        return Ok(Key(c))
     }
 
     // Escape sequence
@@ -1647,15 +1671,15 @@ fn read_input() -> Re<Input> {
 
     match read_char()? {
         'M' =>  (), // Mouse click, handled below
-        'Z' =>  return Ok(Input::EscZ),
-        _   =>  return Ok(Input::UnknownEscSeq),
+        'Z' =>  return Ok(EscZ),
+        _   =>  return Ok(UnknownEscSeq),
     }
 
     // Mouse click
     // TODO: support other mouse modes
-    let c2 = read_char()?;
-    let mut x = (read_char()? as i32) - 33;
-    let mut y = (read_char()? as i32) - 33;
+    let c2 = read_char()? as i32;
+    let mut x = read_char()? as i32 - 33;
+    let mut y = read_char()? as i32 - 33;
     if x < 0 {
         x += 255;
     }
@@ -1665,10 +1689,10 @@ fn read_input() -> Re<Input> {
 
     let v = vek(x,y);
 
-    let r = match (c2 as i32) & 3 /* ignore modifier keys */ {
-        0 ... 2 =>  Input::Click(v),
-        3       =>  Input::ClickRelease(v),
-        _       =>  Input::UnknownEscSeq,
+    let r = match c2 & 3 /* ignore modifier keys */ {
+        0 ... 2 =>  Click(v),
+        3       =>  ClickRelease(v),
+        _       =>  UnknownEscSeq,
     };
 
     Ok(r)
