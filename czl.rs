@@ -40,6 +40,7 @@ macro_rules! er {
  *      - line copy, line break,
  *      - add insert at x offset
  *      - add replace at x offset
+ *  - redo
  *  - cursor horizontal memory
  *  - better navigation
  *
@@ -217,16 +218,18 @@ enum MovementMode {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
-    Command,
-    Insert,
+    Command(Commandstate),
+    Insert(Insertstate),
     PendingInsert,
     Exit,
 }
 
-struct CommandMode {
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Commandstate {
 }
 
-struct Insert {
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Insertstate {
 }
 
 // Left justified, fixed length strings.
@@ -236,12 +239,13 @@ const MODE_PINSERT : &'static str = "Insert?";
 const MODE_EXIT    : &'static str = "Exit   ";
 
 impl Mode {
+    const default_command_state : Mode = Mode::Command(Commandstate { });
 
     fn footer_color(self) -> Colorcell {
         use Mode::*;
         match self {
-            Command         => CONF.color_mode_command,
-            Insert          => CONF.color_mode_insert,
+            Command(_)      => CONF.color_mode_command,
+            Insert(_)       => CONF.color_mode_insert,
             PendingInsert   => CONF.color_mode_insert,
             Exit            => CONF.color_mode_exit,
         }
@@ -250,8 +254,8 @@ impl Mode {
     fn name(self) -> &'static str {
         use Mode::*;
         match self {
-            Command         => MODE_COMMAND,
-            Insert          => MODE_INSERT,
+            Command(_)      => MODE_COMMAND,
+            Insert(_)       => MODE_INSERT,
             PendingInsert   => MODE_PINSERT,
             Exit            => MODE_EXIT,
         }
@@ -263,22 +267,20 @@ impl Mode {
         }
 
         use Mode::*;
-        let new_m = match m {
-            Command => {
-                let op = ModeView::input_to_op(i, e);
-                // TODO store this into the mode
-                let mut modeview = ModeView { };
-                modeview.op(op, e)?
+        let next = match m {
+            Command(mut state) => {
+                let op = Mode::input_to_command_op(i, e);
+                state.do_command(op, e)?
             }
-            Insert  => {
-                let op = ModeInsert::input_to_op(i, e);
-                let mut modeinsert = ModeInsert { };
-                modeinsert.op(op, e)?
+            Insert(mut state) => {
+                let op = Mode::input_to_insert_op(i, e);
+                state.do_command(op, e)?
             },
             PendingInsert => {
                 e.buffer.snapshot();
-                // Fallback on Insert mode
-                Mode::process_input(Mode::Insert, i, e)?
+                // fallback on Insert mode
+                let insertmode = Insert(e.buffer.start_insert(e.view.cursor));
+                Mode::process_input(insertmode, i, e)?
             },
             Exit    => panic!("cannot process input in Exit state"),
         };
@@ -289,7 +291,41 @@ impl Mode {
         //       probably on any buffer mutation and every cursor movement
         e.view.update(&e.buffer);
 
-        Ok(new_m)
+        Ok(next)
+    }
+
+    fn input_to_command_op(i: Input, e: &Editor) -> CommandOp {
+        use Input::*;
+        use CommandOp::*;
+        match i {
+            // TODO: more sophisticated cursor movement ...
+            Key('h')    => Movement(Move::Left),
+            Key('j')    => Movement(Move::Down),
+            Key('k')    => Movement(Move::Up),
+            Key('l')    => Movement(Move::Right),
+            Key('d')    => DelLine(usize(e.view.cursor.y)),
+            Key('u')    => Undo,
+            Key('o')    => NewLine(usize(e.view.cursor.y)),
+            Key('\t')   => SwitchInsert,
+            Key('s')    => Save(format!("{}.tmp", e.view.filepath)),
+            Key('\\')   => ClearConsole,
+            Key('b')
+                        => panic!("BOOM !"),
+                        //=> return er!("BOOM !"),
+            // TODO: handle mouse click
+            _ => Noop,
+        }
+    }
+
+    fn input_to_insert_op(i: Input, e: &Editor) -> InsertOp {
+        use Input::*;
+        use InsertOp::*;
+        match i {
+            Key(ESC) | EscZ => SwitchCommand,
+            Key(ENTER)      => BreakLine(e.view.cursor),
+            Key(c)          => Append(e.view.cursor, c),
+            _ => Noop,
+        }
     }
 }
 
@@ -355,27 +391,19 @@ struct Line {
     stop:   usize,      // exclusive
 }
 
-struct ModeView {
-    // data mode view like pending commands ...
-}
-
-struct ModeInsert {
-    // data for insertions
-}
-
-enum BufferViewOp {
+enum CommandOp {
     DelLine(usize),
     NewLine(usize),
     Movement(Move),
     Undo,
     Redo,
-    Save, // TODO: add filename
-    SwitchInsert, // CLEANUP: delete once migrated to ModeView wrapper
+    Save(String),
+    SwitchInsert,
     ClearConsole,
     Noop,
 }
 
-enum BufferInsertOp {
+enum InsertOp {
     BreakLine(Vek),
     Append(Vek, char),
     SwitchCommand,
@@ -1233,6 +1261,16 @@ impl Buffer {
         self.current_snapshot.line_indexes.remove(y);
     }
 
+    fn line_new(&mut self, lineno: usize) {
+        let lastline = self.current_snapshot.line_indexes.len() - 1;
+        self.current_snapshot.line_indexes.reserve(1);
+        for i in (lineno..lastline).rev() {
+            self.current_snapshot.line_indexes[i+1] = self.current_snapshot.line_indexes[i];
+        }
+
+        self.current_snapshot.line_indexes[lineno] = self.textbuffer.emptyline();
+    }
+
     fn undo(&mut self) {
         match self.previous_snapshots.pop() {
             Some(prev_snapshot) => {
@@ -1241,34 +1279,22 @@ impl Buffer {
             None => (),
         }
     }
-}
 
-impl ModeView {
-    fn input_to_op(i: Input, e: &Editor) -> BufferViewOp {
-        use Input::*;
-        use BufferViewOp::*;
-        match i {
-            // TODO: more sophisticated cursor movement ...
-            Key('h')    => Movement(Move::Left),
-            Key('j')    => Movement(Move::Down),
-            Key('k')    => Movement(Move::Up),
-            Key('l')    => Movement(Move::Right),
-            Key('d')    => DelLine(usize(e.view.cursor.y)),
-            Key('u')    => Undo,
-            Key('o')    => NewLine(usize(e.view.cursor.y)),
-            Key('\t')   => SwitchInsert,
-            Key('s')    => Save,
-            Key('\\')   => ClearConsole,
-            Key('b')
-                        => panic!("BOOM !"),
-                        //=> return er!("BOOM !"),
-            // TODO: handle mouse click
-            _ => Noop,
-        }
+    fn start_insert(&mut self, cursor: Vek) -> Insertstate {
+        // TODO !
+        Insertstate { }
     }
 
-    fn op(&mut self, op: BufferViewOp, e: &mut Editor) -> Re<Mode> {
-        use BufferViewOp::*;
+    fn stop_insert(&mut self, cursor: Vek) {
+        // TODO: do I need this ?
+    }
+
+    // TODO: append mode, replace mode
+}
+
+impl Commandstate {
+    fn do_command(&mut self, op: CommandOp, e: &mut Editor) -> Re<Mode> {
+        use CommandOp::*;
         match op {
             Movement(mvt)   => e.mv_cursor(mvt),
 
@@ -1279,47 +1305,29 @@ impl ModeView {
 
             NewLine(lineno) => {
                 e.buffer.snapshot();
+                e.buffer.line_new(lineno);
+            }
 
-                let lastline = e.buffer.current_snapshot.line_indexes.len() - 1;
-                e.buffer.current_snapshot.line_indexes.reserve(1);
-                for i in (lineno..lastline).rev() {
-                    e.buffer.current_snapshot.line_indexes[i+1] = e.buffer.current_snapshot.line_indexes[i];
-                }
+            Undo => e.buffer.undo(), // TODO: implement redo stack
 
-                e.buffer.current_snapshot.line_indexes[lineno] = e.buffer.textbuffer.emptyline();
-            },
+            Redo => (), // TODO !
 
-            Undo    => e.buffer.undo(), // TODO: implement redo stack
-
-            Redo    => (), // TODO !
-
-            Save    => e.buffer.to_file(&format!("{}.tmp", e.view.filepath))?,
+            Save(path) => e.buffer.to_file(&path)?,
 
             ClearConsole => Debugconsole::clear(),
 
-            SwitchInsert  => return Ok(Mode::Insert),
+            SwitchInsert => return Ok(Mode::PendingInsert),
 
             Noop => (),
         }
 
-        Ok(Mode::Command)
+        Ok(Mode::Command(replace(self, Commandstate { })))
     }
 }
 
-impl ModeInsert {
-    fn input_to_op(i: Input, e: &Editor) -> BufferInsertOp {
-        use Input::*;
-        use BufferInsertOp::*;
-        match i {
-            Key(ESC) | EscZ => SwitchCommand,
-            Key(ENTER)      => BreakLine(e.view.cursor),
-            Key(c)          => Append(e.view.cursor, c),
-            _ => Noop,
-        }
-    }
-
-    fn op(&mut self, op: BufferInsertOp, e: &mut Editor) -> Re<Mode> {
-        use BufferInsertOp::*;
+impl Insertstate {
+    fn do_command(&mut self, op: InsertOp, e: &mut Editor) -> Re<Mode> {
+        use InsertOp::*;
         match op {
             BreakLine(cursor) =>
                 e.buffer.current_snapshot.line_indexes.push(e.buffer.textbuffer.emptyline()),
@@ -1327,12 +1335,12 @@ impl ModeInsert {
             Append(cursor, c) =>
                 e.buffer.textbuffer.append(c), // TODO: take into account cursor
 
-            SwitchCommand => return Ok(Mode::Command),
+            SwitchCommand => return Ok(Mode::default_command_state),
 
             Noop => (),
         }
 
-        Ok(Mode::Insert)
+        Ok(Mode::Insert(replace(self, Insertstate { })))
     }
 }
 
@@ -1365,7 +1373,7 @@ impl Editor {
 
     fn run() -> Re<()> {
         let mut e = Editor::mk_editor()?;
-        let mut m = Mode::Command;
+        let mut m = Mode::default_command_state;
 
         e.refresh_screen(&m)?;
 
