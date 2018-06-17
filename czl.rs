@@ -34,89 +34,6 @@ macro_rules! er {
 
 
 
-
-
-// EXPERIMENT - BEGIN
-// this is an experiment of principle with the architecture I want to try with Rust
-// in short I have a top level Mode type that drives the input processing
-// that mode deleguates to deleguate to specific implementations which owns the buffer
-// in specific cases.
-// benefits is type safety of matching the exact input parsing to the exact impl applying
-// the operations, and type safety around cleanups entering and leaving various states.
-
-#[derive(Debug)]
-struct I { }
-
-#[derive(Debug)]
-struct E {
-    data: Vec<u8>,
-}
-
-struct EM1<'a> {
-    e: &'a mut E,
-}
-
-struct EM2<'a> {
-    e: &'a mut E,
-}
-
-#[derive(Debug)]
-enum M {
-    M1,
-    M2,
-}
-
-impl M {
-    fn handle(&self, i: I, e: &mut E) -> M {
-        match self {
-            M::M1 => {
-                let mut em1 = EM1 { e };
-                // i can be remapped here through a dynamically populated table
-                em1.handle(i)
-            }
-            M::M2 => {
-                let mut em2 = EM1 { e };
-                // i can be remapped here through a dynamically populated table
-                em2.handle(i)
-            }
-        }
-    }
-}
-
-impl<'a> EM1<'a> {
-    fn handle(&mut self, i: I) -> M {
-        println!("m1: {:?}", self.e);
-
-        // Load a command from the table for that M1
-        //      -> table is dynamically populated from config
-        // apply the command on the data
-
-        M::M2
-    }
-}
-
-impl<'a> EM2<'a> {
-    fn handle(&mut self, i: I) -> M {
-        println!("m1: {:?}", self.e);
-
-        M::M1
-    }
-}
-
-struct EM {
-    e: E,
-    m: M,
-}
-
-impl EM {
-    fn process(m: M, e: &mut E, i: I) -> M {
-       m.handle(i, e)
-    }
-}
-
-// EXPERIMENT - END
-
-
 /*
  * Next Steps:
  *  - text insert:
@@ -302,12 +219,20 @@ enum MovementMode {
 enum Mode {
     Command,
     Insert,
+    PendingInsert,
     Exit,
+}
+
+struct CommandMode {
+}
+
+struct Insert {
 }
 
 // Left justified, fixed length strings.
 const MODE_COMMAND : &'static str = "Command";
 const MODE_INSERT  : &'static str = "Insert ";
+const MODE_PINSERT : &'static str = "Insert?";
 const MODE_EXIT    : &'static str = "Exit   ";
 
 impl Mode {
@@ -315,94 +240,56 @@ impl Mode {
     fn footer_color(self) -> Colorcell {
         use Mode::*;
         match self {
-            Command =>  CONF.color_mode_command,
-            Insert  =>  CONF.color_mode_insert,
-            Exit    =>  CONF.color_mode_exit,
+            Command         => CONF.color_mode_command,
+            Insert          => CONF.color_mode_insert,
+            PendingInsert   => CONF.color_mode_insert,
+            Exit            => CONF.color_mode_exit,
         }
     }
 
     fn name(self) -> &'static str {
         use Mode::*;
         match self {
-            Command =>  MODE_COMMAND,
-            Insert  =>  MODE_INSERT,
-            Exit    =>  MODE_EXIT,
+            Command         => MODE_COMMAND,
+            Insert          => MODE_INSERT,
+            PendingInsert   => MODE_PINSERT,
+            Exit            => MODE_EXIT,
         }
     }
 
-    fn process_input(m: Mode, c: Input, e: &mut Editor) -> Re<Mode> {
-        log(&format!("input: {:?}", c));
-
-        if c == Input::Key(CTRL_C) {
+    fn process_input(m: Mode, i: Input, e: &mut Editor) -> Re<Mode> {
+        if i == Input::Key(CTRL_C) {
             return Ok(Exit)
         }
 
-        // TODO: return a command from the current mode
-        //       then apply the transformation
         use Mode::*;
         let new_m = match m {
-            Command => Mode::process_command(c, e),
-            Insert  => Ok(Mode::process_insert(c, e)),
+            Command => {
+                let op = ModeView::input_to_op(i, e);
+                // TODO store this into the mode
+                let mut modeview = ModeView { };
+                modeview.op(op, e)?
+            }
+            Insert  => {
+                let op = ModeInsert::input_to_op(i, e);
+                let mut modeinsert = ModeInsert { };
+                modeinsert.op(op, e)?
+            },
+            PendingInsert => {
+                e.buffer.snapshot();
+                // Fallback on Insert mode
+                Mode::process_input(Mode::Insert, i, e)?
+            },
             Exit    => panic!("cannot process input in Exit state"),
         };
 
-        // TODO: update the view here regardless of the operation !
-        //  for instance delete line can force a cursor update
+        // TODO: instead of aborting, handle input error processing !
+
+        // TODO: when should views be updated exactly ?
+        //       probably on any buffer mutation and every cursor movement
         e.view.update(&e.buffer);
 
-        new_m
-    }
-
-    fn process_command(c: Input, e: &mut Editor) -> Re<Mode> {
-        use Input::*;
-
-        // TODO: more sophisticated cursor movement ...
-        match c {
-            Key('h')    => e.mv_cursor(Move::Left),
-            Key('j')    => e.mv_cursor(Move::Down),
-            Key('k')    => e.mv_cursor(Move::Up),
-            Key('l')    => e.mv_cursor(Move::Right),
-
-            Key('\\')   => Debugconsole::clear(),
-
-            Key('d')    => e.buffer.view_op(BufferViewOp::DelLine(usize(e.view.cursor.y))),
-            Key('u')    => e.buffer.view_op(BufferViewOp::Undo),
-            Key('o')    => e.buffer.view_op(BufferViewOp::NewLine(usize(e.view.cursor.y))),
-            Key('\t')   => {
-                e.buffer.view_op(BufferViewOp::Insert);
-                return Ok(Mode::Insert);
-            }
-
-            Key('s')    => e.buffer.to_file(&format!("{}.tmp", e.view.filepath))?,
-
-            Key('b')
-                        => panic!("BOOM !"),
-//                        => return er!("BOOM !"),
-
-            // TODO: handle mouse click
-
-            _ => (),
-        }
-
-        Ok(Mode::Command)
-    }
-
-    // TODO: process_insert should only be called with a buffer in 'Edit' mode
-    // having a buffer in 'Edit' mode would allow for some by-design safe optimizations like
-    // BreakLine truncating the existing line, instead of relying on correctly mapping both sides
-    fn process_insert(c: Input, e: &mut Editor) -> Mode {
-        use Input::*;
-        match c {
-            Key(ESC) | EscZ => {
-                e.buffer.insert_op(BufferInsertOp::View);
-                return Mode::Command;
-            }
-            Key(ENTER)      => e.buffer.insert_op(BufferInsertOp::BreakLine(e.view.cursor)),
-            Key(c)          => e.buffer.insert_op(BufferInsertOp::Append(e.view.cursor, c)),
-            _ => (),
-        }
-
-        Mode::Insert
+        Ok(new_m)
     }
 }
 
@@ -459,7 +346,6 @@ struct Buffer {
     textbuffer:             Textbuffer,
     previous_snapshots:     Vec<Textsnapshot>,
     current_snapshot:       Textsnapshot,
-    state:                  BufferState,
 }
 
 // A pair of offsets into a buffer for delimiting lines.
@@ -469,35 +355,33 @@ struct Line {
     stop:   usize,      // exclusive
 }
 
-struct BufferView<'a> {
-    buffer: &'a mut Buffer,
+struct ModeView {
+    // data mode view like pending commands ...
 }
 
-struct BufferInsert<'a> {
-    buffer: &'a mut Buffer,
-    no_insert_yet: bool,
+struct ModeInsert {
+    // data for insertions
 }
 
 enum BufferViewOp {
     DelLine(usize),
     NewLine(usize),
+    Movement(Move),
     Undo,
     Redo,
-    Insert, // CLEANUP: delete once migrated to BufferView wrapper
+    Save, // TODO: add filename
+    SwitchInsert, // CLEANUP: delete once migrated to ModeView wrapper
+    ClearConsole,
+    Noop,
 }
 
 enum BufferInsertOp {
     BreakLine(Vek),
     Append(Vek, char),
-    View,
+    SwitchCommand,
+    Noop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum BufferState {
-    Viewing,
-    PendingInsert,
-    Inserting,
-}
 
 // Point to a place inside a Buffer
 struct Cursor<'a> {
@@ -1278,7 +1162,6 @@ impl Buffer {
             textbuffer:         Textbuffer { text, lines },
             previous_snapshots: Vec::new(),
             current_snapshot:   Textsnapshot { line_indexes },
-            state:              BufferState::Viewing,
         }
     }
 
@@ -1358,109 +1241,98 @@ impl Buffer {
             None => (),
         }
     }
-
-    fn view_op(&mut self, op: BufferViewOp) {
-        check!(BufferState::Viewing == self.state);
-
-        use BufferViewOp::*;
-        match op {
-            DelLine(lineno) => self.line_del(lineno),
-
-            NewLine(lineno) => {
-                self.snapshot();
-
-                let lastline = self.current_snapshot.line_indexes.len() - 1;
-                self.current_snapshot.line_indexes.reserve(1);
-                for i in (lineno..lastline).rev() {
-                    self.current_snapshot.line_indexes[i+1] = self.current_snapshot.line_indexes[i];
-                }
-
-                self.current_snapshot.line_indexes[lineno] = self.textbuffer.emptyline();
-            },
-
-            Undo    => self.undo(),
-
-            Redo    => (),
-
-            Insert  => self.state = BufferState::PendingInsert,
-        }
-    }
-
-    fn insert_op(&mut self, op: BufferInsertOp) {
-        use BufferState::*;
-        match self.state {
-            Viewing         => panic!("expected PendingInsert or Inserting mode"),
-            PendingInsert   => {
-                self.snapshot();
-                self.state = Inserting;
-            }
-            Inserting       => (),
-        }
-
-        // TODO: take a snapshot on first op if not taken yet
-        use BufferInsertOp::*;
-        match op {
-            BreakLine(cursor) =>
-                self.current_snapshot.line_indexes.push(self.textbuffer.emptyline()),
-
-            Append(cursor, c) =>
-                self.textbuffer.append(c), // TODO: take into account cursor
-
-            View =>
-                self.state = BufferState::Viewing,
-        }
-    }
 }
 
-impl <'a> BufferView<'a> {
-    fn op(&mut self, op: BufferViewOp) {
+impl ModeView {
+    fn input_to_op(i: Input, e: &Editor) -> BufferViewOp {
+        use Input::*;
+        use BufferViewOp::*;
+        match i {
+            // TODO: more sophisticated cursor movement ...
+            Key('h')    => Movement(Move::Left),
+            Key('j')    => Movement(Move::Down),
+            Key('k')    => Movement(Move::Up),
+            Key('l')    => Movement(Move::Right),
+            Key('d')    => DelLine(usize(e.view.cursor.y)),
+            Key('u')    => Undo,
+            Key('o')    => NewLine(usize(e.view.cursor.y)),
+            Key('\t')   => SwitchInsert,
+            Key('s')    => Save,
+            Key('\\')   => ClearConsole,
+            Key('b')
+                        => panic!("BOOM !"),
+                        //=> return er!("BOOM !"),
+            // TODO: handle mouse click
+            _ => Noop,
+        }
+    }
+
+    fn op(&mut self, op: BufferViewOp, e: &mut Editor) -> Re<Mode> {
         use BufferViewOp::*;
         match op {
+            Movement(mvt)   => e.mv_cursor(mvt),
+
             DelLine(lineno) => {
-                self.buffer.snapshot();
-                self.buffer.line_del(lineno);
+                e.buffer.snapshot();
+                e.buffer.line_del(lineno);
             }
 
             NewLine(lineno) => {
-                self.buffer.snapshot();
+                e.buffer.snapshot();
 
-                let lastline = self.buffer.current_snapshot.line_indexes.len() - 1;
-                self.buffer.current_snapshot.line_indexes.reserve(1);
+                let lastline = e.buffer.current_snapshot.line_indexes.len() - 1;
+                e.buffer.current_snapshot.line_indexes.reserve(1);
                 for i in (lineno..lastline).rev() {
-                    self.buffer.current_snapshot.line_indexes[i+1] = self.buffer.current_snapshot.line_indexes[i];
+                    e.buffer.current_snapshot.line_indexes[i+1] = e.buffer.current_snapshot.line_indexes[i];
                 }
 
-                self.buffer.current_snapshot.line_indexes[lineno] = self.buffer.textbuffer.emptyline();
+                e.buffer.current_snapshot.line_indexes[lineno] = e.buffer.textbuffer.emptyline();
             },
 
-            Undo    => self.buffer.undo(), // TODO: implement redo stack
+            Undo    => e.buffer.undo(), // TODO: implement redo stack
 
             Redo    => (), // TODO !
 
-            Insert  => (), // CLEANUP: delete me once migrated to BufferView
+            Save    => e.buffer.to_file(&format!("{}.tmp", e.view.filepath))?,
+
+            ClearConsole => Debugconsole::clear(),
+
+            SwitchInsert  => return Ok(Mode::Insert),
+
+            Noop => (),
         }
+
+        Ok(Mode::Command)
     }
 }
 
-impl <'a> BufferInsert<'a> {
-    fn op(&mut self, op: BufferInsertOp) {
-        use BufferState::*;
-
-        if !self.no_insert_yet {
-            self.buffer.snapshot();
-            self.no_insert_yet = true;
+impl ModeInsert {
+    fn input_to_op(i: Input, e: &Editor) -> BufferInsertOp {
+        use Input::*;
+        use BufferInsertOp::*;
+        match i {
+            Key(ESC) | EscZ => SwitchCommand,
+            Key(ENTER)      => BreakLine(e.view.cursor),
+            Key(c)          => Append(e.view.cursor, c),
+            _ => Noop,
         }
+    }
 
+    fn op(&mut self, op: BufferInsertOp, e: &mut Editor) -> Re<Mode> {
         use BufferInsertOp::*;
         match op {
             BreakLine(cursor) =>
-                self.buffer.current_snapshot.line_indexes.push(self.buffer.textbuffer.emptyline()),
+                e.buffer.current_snapshot.line_indexes.push(e.buffer.textbuffer.emptyline()),
 
             Append(cursor, c) =>
-                self.buffer.textbuffer.append(c), // TODO: take into account cursor
+                e.buffer.textbuffer.append(c), // TODO: take into account cursor
 
-            View => (), // CLEANUP: delete me once migrated to BufferInsert
+            SwitchCommand => return Ok(Mode::Command),
+
+            Noop => (),
         }
+
+        Ok(Mode::Insert)
     }
 }
 
@@ -1498,12 +1370,14 @@ impl Editor {
         e.refresh_screen(&m)?;
 
         while m != Mode::Exit {
-            let c = read_input()?;
+            let i = read_input()?;
+            log(&format!("input: {:?}", i));
 
             let frame_time = Scopeclock::measure("last frame");     // caveat: displayed on next frame only
 
-            m = Mode::process_input(m, c, &mut e)?;
+            m = Mode::process_input(m, i, &mut e)?;
 
+            // CLEANUP: extract Framebuffer from screen and do framebuffer:refresh(&e, &m):
             e.refresh_screen(&m)?;
         }
 
