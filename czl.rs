@@ -7,6 +7,7 @@
 
 use std::cmp::max;
 use std::cmp::min;
+use std::error::Error;
 use std::fmt::Display;
 use std::fmt;
 use std::fs;
@@ -15,6 +16,10 @@ use std::io::Read;
 use std::io::Write;
 use std::io;
 use std::mem::replace;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::SyncSender;
+use std::sync::mpsc;
+use std::thread;
 
 
 macro_rules! check {
@@ -705,11 +710,16 @@ impl std::error::Error for Er {
 
 impl From<io::Error> for Er {
     fn from(err: io::Error) -> Er {
-        use std::error::Error;
         Er { descr: format!("{}:?? cause: {}", file!(), err.description()) }
     }
 }
 
+
+impl From<mpsc::RecvError> for Er {
+    fn from(err: mpsc::RecvError) -> Er {
+        Er { descr: format!("{}:?? cause: {}", file!(), err.description()) }
+    }
+}
 
 struct Scopeclock<'a> {
     tag: &'a str,
@@ -1381,8 +1391,15 @@ impl Editor {
 
         e.refresh_screen(&m)?;
 
+        let (send, recv) = mpsc::sync_channel(32);
+
+        thread::spawn(move || {
+            push_char(&send);
+        });
+
+
         while m != Mode::Exit {
-            let i = read_input()?;
+            let i = pull_input(&recv)?;
             log(&format!("input: {:?}", i));
 
             let frame_time = Scopeclock::measure("last frame");     // caveat: displayed on next frame only
@@ -1625,38 +1642,38 @@ fn is_printable(c : char) -> bool {
     ESC < c && c < BACKSPACE
 }
 
-//fn read_char() -> Result<char, io::Error> {
-//    let mut stdin = io::stdin();
-//    let mut buf = [0;1];
-//    // TODO: handle interrupts when errno == EINTR
-//    // TODO: support unicode !
-//    loop {
-//        let n = stdin.read(&mut buf)?;
-//        if n == 1 {
-//            break;
-//        }
-//        // otherwise, it's a timeout => retry
+//fn read_char() -> Re<char> {
+//    let c;
+//    unsafe {
+//        c = read_1B();
+//    }
+//    if c < 0 {
+//        return er!(format!("error reading char ! errno={}", -c));
 //    }
 //
-//    Ok(buf[0] as char)
+//    Ok(c as u8 as char)
 //}
 
-fn read_char() -> Re<char> {
-    let c;
-    unsafe {
-        c = read_1B();
-    }
-    if c < 0 {
-        return er!(format!("error reading char ! errno={}", -c));
-    }
 
-    Ok(c as u8 as char)
+fn push_char(chan: &SyncSender<char>) {
+    let mut stdin = io::stdin();
+    let mut buf = [0;1];
+    // TODO: handle interrupts when errno == EINTR
+    // TODO: support unicode !
+    loop {
+        let n = stdin.read(&mut buf).unwrap(); // TODO: pass error through the channel ?
+        if n == 1 {
+            chan.send(buf[0] as char).unwrap();
+        }
+    }
 }
 
-fn read_input() -> Re<Input> {
+fn pull_input(chan: &Receiver<char>) -> Re<Input> {
     use Input::*;
+    //use std::sync::mpsc::TryRecvError;
+    use std::sync::mpsc::TryRecvError::*;
 
-    let c = read_char()?;
+    let c = chan.recv()?;
 
     if c == RESIZE {
         return Ok(Resize);
@@ -1666,10 +1683,15 @@ fn read_input() -> Re<Input> {
         return Ok(Key(c))
     }
 
-    // Escape sequence
-    check!(read_char()? == '[');
+    // Escape: if no more char immediately available, return ESC, otherwise parse an escape sequence
 
-    match read_char()? {
+    match chan.try_recv() {
+        Ok(c)       =>  check!(c == '['),   // This was an escape sequence, continue parsing
+        Err(Empty)  => return Ok(Key(ESC)), // Nothing to read: this was an escape
+        Err(e)      => return er!(e.description()),
+    }
+
+    match chan.recv()? {
         'M' =>  (), // Mouse click, handled below
         'Z' =>  return Ok(EscZ),
         _   =>  return Ok(UnknownEscSeq),
@@ -1677,9 +1699,9 @@ fn read_input() -> Re<Input> {
 
     // Mouse click
     // TODO: support other mouse modes
-    let c2 = read_char()? as i32;
-    let mut x = read_char()? as i32 - 33;
-    let mut y = read_char()? as i32 - 33;
+    let c2 = chan.recv()? as i32;
+    let mut x = chan.recv()? as i32 - 33;
+    let mut y = chan.recv()? as i32 - 33;
     if x < 0 {
         x += 255;
     }
