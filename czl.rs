@@ -38,7 +38,6 @@ macro_rules! er {
 }
 
 
-
 /*
  * Next Steps:
  *  - text insert:
