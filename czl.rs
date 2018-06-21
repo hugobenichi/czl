@@ -39,18 +39,24 @@ macro_rules! er {
 
 
 /*
- * Next Steps:
- *  - text insert:
- *      - line copy, line break,
- *      - add insert at x offset
- *      - add replace at x offset
+ * Features:
+ *  - better navigation !
+ *  - replace mode
+ *  - copy and yank buffer
  *  - redo
  *  - cursor horizontal memory
- *  - better navigation
+ *  - buffer explorer
+ *  - directory explorer
+ *  - recenter screen
+ *  - grep move
+ *  - dirty file indicator
+ *  - cursor previous points and cursor markers
+ *  - ctags support
  *
- * General TODOs:
+ * TODOs and cleanups
+ *  - migrate text snapshot to command list
+ *  - fuzzer
  *  - handle resize
- *  - dir explorer
  *  - think more about where to track the screen area:
  *      right now it is repeated both in Screen and in View
  *      ideally Screen would not be tracking it
@@ -278,7 +284,10 @@ impl Mode {
         let next = match m {
             Command(mut state) => {
                 let op = Mode::input_to_command_op(i, e);
-                state.do_command(op, e)?
+                let next = state.do_command(op, e)?;
+                // should this instead be managed per operation in a more scoped way ?
+                e.view.update(&e.buffer);
+                next
             }
 
             Insert(mut state) => {
@@ -300,10 +309,6 @@ impl Mode {
         // TODO: instead of aborting, handle input error processing, and check if any dirty files
         // need saving !
 
-        // TODO: when should views be updated exactly ?
-        //       probably on any buffer mutation and every cursor movement
-        e.view.update(&e.buffer);
-
         Ok(next)
     }
 
@@ -318,6 +323,7 @@ impl Mode {
             Key('l')    => Movement(Move::Right),
             // TODO: Consider changing to Mut(LineOp, cursor) for something more systematic ?
             Key('o')    => LineNew(e.view.cursor),
+            //Key('O')    => LineNew(e.view.cursor), // Implement with multi command !
             Key(ENTER)  => LineBreak(e.view.cursor),
             Key('d')    => LineDel(e.view.cursor),
             Key('u')    => Undo,
@@ -338,7 +344,7 @@ impl Mode {
         use InsertOp::*;
         match i {
             Key(ESC) | EscZ => SwitchCommand,
-            Key(ENTER)      => BreakLine(e.view.cursor),
+            Key(ENTER)      => LineBreak(e.view.cursor),
             Key(c)          => CharInsert(e.view.cursor, c),
             _ => Noop,
         }
@@ -426,7 +432,7 @@ enum CommandOp {
 }
 
 enum InsertOp {
-    BreakLine(Vek),
+    LineBreak(Vek),
     CharInsert(Vek, char),
     SwitchCommand,
     Noop,
@@ -1244,10 +1250,6 @@ impl Buffer {
                 };
                 lines.push(line(a, b));
                 a = b + 1; // skip the '\n'
-
-                if lines.len() == 20 {
-                    break;
-                }
             }
         }
 
@@ -1353,10 +1355,7 @@ impl Buffer {
         }
     }
 
-    fn insert(&mut self, cursor: Vek, c: char) {
-        let lineno = usize(cursor.y);
-        let colno = usize(cursor.x);
-
+    fn insert(&mut self, lineno: usize, colno: usize, c: char) {
         let last_idx = self.textbuffer.lines.len() - 1;
         let line_idx = self.line_index(lineno);
         if line_idx != last_idx {
@@ -1399,11 +1398,12 @@ impl Commandstate {
                 e.buffer.line_new(lineno);
             }
 
-            LineBreak(pos) => {
-                let lineno = usize(pos.y);
-                let colno = usize(pos.x);
+            LineBreak(Vek { x, y }) => {
+                let lineno = usize(y);
+                let colno = usize(x);
                 e.buffer.snapshot();
                 e.buffer.line_break(lineno, colno);
+                e.view.cursor = vek(0, y + 1);
             }
 
             Undo => e.buffer.undo(), // TODO: implement redo stack
@@ -1427,18 +1427,16 @@ impl Insertstate {
     fn do_insert(&mut self, op: InsertOp, e: &mut Editor) -> Re<Mode> {
         use InsertOp::*;
         match op {
-            BreakLine(cursor) => {
-                // TODO: take into account cursor !
-                let newline = e.buffer.textbuffer.emptyline();
-                e.buffer.current_snapshot.line_indexes.push(newline)
+            LineBreak(Vek { x, y }) => {
+                e.buffer.line_break(usize(y), usize(x));
+                e.view.cursor = vek(0, y + 1);
             }
 
-            CharInsert(cursor, c) => {
+            CharInsert(Vek { x, y }, c) => {
                 if is_printable(c) {
-                    // TODO: take into account cursor
-                    e.buffer.insert(cursor, c);
-                    // TODO update cursor right there ?
-                    // TODO: think abotu auto linebreak
+                    e.buffer.insert(usize(y), usize(x), c);
+                    e.view.cursor = vek(x + 1, y);
+                    // TODO: think about auto linebreak
                 }
             }
 
