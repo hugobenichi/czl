@@ -1521,7 +1521,7 @@ impl Editor {
 
         while m != Mode::Exit {
             let i = pull_input(&recv)?;
-            log(&format!("input: {:?}", i));
+            log(&format!("input: {}", i));
 
             let frame_time = Scopeclock::measure("last frame");     // caveat: displayed on next frame only
 
@@ -1739,6 +1739,38 @@ enum Input {
     Error,
 }
 
+impl fmt::Display for Input {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use Input::*;
+        match self {
+            Noinput                         => f.write_str(&"Noinput"),
+            UnknownEscSeq                   => f.write_str(&"Unknown"),
+            EscZ                            => f.write_str(&"EscZ"),
+            Resize                          => f.write_str(&"Resize"),
+            Error                           => f.write_str(&"Error"),
+            Key(NO_KEY)                     => f.write_str(&"No input"),
+            Key(CTRL_C)                     => f.write_str(&"CTRL_C"),
+            Key(CTRL_D)                     => f.write_str(&"CTRL_D"),
+            Key(CTRL_F)                     => f.write_str(&"CTRL_F"),
+            Key(CTRL_H)                     => f.write_str(&"CTRL_H"),
+            Key(TAB)                        => f.write_str(&"TAB"),
+            Key(LINE_FEED)                  => f.write_str(&"LINE_FEED"),
+            Key(VTAB)                       => f.write_str(&"VTAB"),
+            Key(NEW_PAGE)                   => f.write_str(&"NEW_PAGE"),
+            Key(ENTER)                      => f.write_str(&"ENTER"),
+            Key(CTRL_Q)                     => f.write_str(&"CTRL_Q"),
+            Key(CTRL_S)                     => f.write_str(&"CTRL_S"),
+            Key(CTRL_U)                     => f.write_str(&"CTRL_U"),
+            Key(CTRL_Z)                     => f.write_str(&"CTRL_Z"),
+            Key(ESC)                        => f.write_str(&"ESC"),
+            Key(BACKSPACE)                  => f.write_str(&"BACKSPACE"),
+            Key(c)                          => write!(f, "'{}'", c),
+            Click(Vek { x, y })             => write!(f, "click ({},{})'", y, x),
+            ClickRelease(Vek { x, y })      => write!(f, "unclick ({},{})'", y, x),
+        }
+    }
+}
+
 const NO_KEY    : char = 0 as char;
 const CTRL_C    : char = 3 as char;       // end of text
 const CTRL_D    : char = 4 as char;       // end of transmission
@@ -1807,7 +1839,7 @@ fn pull_input(chan: &Receiver<char>) -> Re<Input> {
     // Escape: if no more char immediately available, return ESC, otherwise parse an escape sequence
 
     match chan.try_recv() {
-        Ok(c)       =>  check!(c == '['),   // This was an escape sequence, continue parsing
+        Ok(c)       => check!(c == '['),   // This was an escape sequence, continue parsing
         Err(Empty)  => return Ok(Key(ESC)), // Nothing to read: this was an escape
         Err(e)      => return er!(e.description()),
     }
