@@ -339,7 +339,7 @@ impl Mode {
         match i {
             Key(ESC) | EscZ => SwitchCommand,
             Key(ENTER)      => BreakLine(e.view.cursor),
-            Key(c)          => Append(e.view.cursor, c),
+            Key(c)          => CharInsert(e.view.cursor, c),
             _ => Noop,
         }
     }
@@ -427,7 +427,7 @@ enum CommandOp {
 
 enum InsertOp {
     BreakLine(Vek),
-    Append(Vek, char),
+    CharInsert(Vek, char),
     SwitchCommand,
     Noop,
 }
@@ -471,6 +471,10 @@ impl View {
     }
 
     fn update(&mut self, buffer: &Buffer) {
+        if buffer.nlines() == 0 {
+            return;
+        }
+
         // Cursor adjustment
         {
             let mut p = self.cursor;
@@ -1172,23 +1176,43 @@ impl Line {
 }
 
 impl Textbuffer {
-    // TODO: this need to support on-going append in the middle of a line !
-    //       todo that, add three parameters
-    //          the type of insert (insert(x_pos), append, replace(x_pos))
     fn append(&mut self, c: char) {
-        if !is_printable(c) {
-            return
-        }
-
         self.text.push(c as u8);
         self.lines.last_mut().unwrap().stop += 1;
-
-        // TODO update cursor
     }
+
+    fn insert(&mut self, colno: usize, c: char) {
+        let (left, right) = self.lines.last().unwrap().cut(colno);
+        self.append(' ');
+
+        for i in (right.start..right.stop).rev() {
+            self.text[i+1] = self.text[i];
+        }
+        self.text[right.start] = c as u8;
+    }
+
+    // TODO: replace char mode
 
     fn emptyline(&mut self) -> usize {
         self.lines.push(line(self.text.len(), self.text.len()));
 
+        self.lines.len() - 1
+    }
+
+    fn copyline(&mut self, line_idx: usize) -> usize {
+        let src = self.lines[line_idx];
+        let dststart = self.text.len();
+        let dststop = dststart + src.len();
+        let dst = line(dststart, dststop);
+
+        self.text.reserve(src.len());
+        for i in src.start..src.stop {
+            // This is so lame ;-( I want my memcpy
+            let c = self.text[i];
+            self.text.push(c);
+        }
+
+        self.lines.push(dst);
         self.lines.len() - 1
     }
 }
@@ -1329,6 +1353,20 @@ impl Buffer {
         }
     }
 
+    fn insert(&mut self, cursor: Vek, c: char) {
+        let lineno = usize(cursor.y);
+        let colno = usize(cursor.x);
+
+        let last_idx = self.textbuffer.lines.len() - 1;
+        let line_idx = self.line_index(lineno);
+        if line_idx != last_idx {
+            let newline_idx = self.textbuffer.copyline(line_idx);
+            self.current_snapshot.line_indexes[lineno] = newline_idx;
+        }
+
+        self.textbuffer.insert(colno, c);
+    }
+
     fn start_insert(&mut self, cursor: Vek) -> Insertstate {
         // TODO !
         Insertstate { }
@@ -1348,9 +1386,11 @@ impl Commandstate {
             Movement(mvt)   => e.mv_cursor(mvt),
 
             LineDel(pos) => {
-                let lineno = usize(pos.y);
-                e.buffer.snapshot();
-                e.buffer.line_del(lineno);
+                if e.buffer.nlines() > 0 {
+                    let lineno = usize(pos.y);
+                    e.buffer.snapshot();
+                    e.buffer.line_del(lineno);
+                }
             }
 
             LineNew(pos) => {
@@ -1393,11 +1433,13 @@ impl Insertstate {
                 e.buffer.current_snapshot.line_indexes.push(newline)
             }
 
-            Append(cursor, c) => {
-                // TODO: take into account cursor
-                e.buffer.textbuffer.append(c)
-                // TODO update cursor right there ?
-                // TODO: think abotu auto linebreak
+            CharInsert(cursor, c) => {
+                if is_printable(c) {
+                    // TODO: take into account cursor
+                    e.buffer.insert(cursor, c);
+                    // TODO update cursor right there ?
+                    // TODO: think abotu auto linebreak
+                }
             }
 
             SwitchCommand =>
