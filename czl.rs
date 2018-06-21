@@ -280,20 +280,25 @@ impl Mode {
                 let op = Mode::input_to_command_op(i, e);
                 state.do_command(op, e)?
             }
+
             Insert(mut state) => {
                 let op = Mode::input_to_insert_op(i, e);
-                state.do_command(op, e)?
-            },
+                state.do_insert(op, e)?
+            }
+
             PendingInsert => {
                 e.buffer.snapshot();
-                // fallback on Insert mode
                 let insertmode = Insert(e.buffer.start_insert(e.view.cursor));
                 Mode::process_input(insertmode, i, e)?
-            },
-            Exit    => panic!("cannot process input in Exit state"),
+            }
+
+            Exit => {
+                panic!("cannot process input in Exit state")
+            }
         };
 
-        // TODO: instead of aborting, handle input error processing !
+        // TODO: instead of aborting, handle input error processing, and check if any dirty files
+        // need saving !
 
         // TODO: when should views be updated exactly ?
         //       probably on any buffer mutation and every cursor movement
@@ -311,9 +316,12 @@ impl Mode {
             Key('j')    => Movement(Move::Down),
             Key('k')    => Movement(Move::Up),
             Key('l')    => Movement(Move::Right),
-            Key('d')    => DelLine(usize(e.view.cursor.y)),
+            // TODO: Consider changing to Mut(LineOp, cursor) for something more systematic ?
+            Key('o')    => LineNew(e.view.cursor),
+            Key(ENTER)  => LineBreak(e.view.cursor),
+            Key('d')    => LineDel(e.view.cursor),
             Key('u')    => Undo,
-            Key('o')    => NewLine(usize(e.view.cursor.y)),
+            Key('U')    => Redo,
             Key('\t')   => SwitchInsert,
             Key('s')    => Save(format!("{}.tmp", e.view.filepath)),
             Key('\\')   => ClearConsole,
@@ -399,9 +407,15 @@ struct Line {
     stop:   usize,      // exclusive
 }
 
+fn line(start: usize, stop: usize) -> Line {
+    check!(start <= stop);
+    Line { start , stop }
+}
+
 enum CommandOp {
-    DelLine(usize),
-    NewLine(usize),
+    LineDel(Vek),
+    LineNew(Vek),
+    LineBreak(Vek),
     Movement(Move),
     Undo,
     Redo,
@@ -1107,7 +1121,7 @@ impl<'a> Screen<'a> {
                 let file_offset = file_base_offset + lineoffset;
                 let frame_offset = frame_base_offset + lineoffset;
 
-                let mut line = buffer.get_line(file_offset);
+                let mut line = buffer.line_get_slice(file_offset);
                 line = clamp(line, self.textarea.w() as usize);
                 self.framebuffer.put_line(frame_offset, line);
             }
@@ -1149,6 +1163,34 @@ impl Line {
     fn len(self) -> usize {
         self.stop - self.start
     }
+
+    fn cut(self, n: usize) -> (Line, Line) {
+        let pivot = self.start + n;
+        check!(pivot <= self.stop);
+        (line(self.start, pivot), line(pivot, self.stop))
+    }
+}
+
+impl Textbuffer {
+    // TODO: this need to support on-going append in the middle of a line !
+    //       todo that, add three parameters
+    //          the type of insert (insert(x_pos), append, replace(x_pos))
+    fn append(&mut self, c: char) {
+        if !is_printable(c) {
+            return
+        }
+
+        self.text.push(c as u8);
+        self.lines.last_mut().unwrap().stop += 1;
+
+        // TODO update cursor
+    }
+
+    fn emptyline(&mut self) -> usize {
+        self.lines.push(line(self.text.len(), self.text.len()));
+
+        self.lines.len() - 1
+    }
 }
 
 impl Buffer {
@@ -1176,7 +1218,7 @@ impl Buffer {
                     Some(o) => a + o,
                     None    => l,
                 };
-                lines.push(Line { start: a, stop: b });
+                lines.push(line(a, b));
                 a = b + 1; // skip the '\n'
 
                 if lines.len() == 20 {
@@ -1193,10 +1235,8 @@ impl Buffer {
         //       this is necessary to start a newline for appending chars, until command -> insert
         //       mode transation does this properly.
         {
-            let start = text.len();
-            let stop = text.len();
             line_indexes.push(lines.len());
-            lines.push(Line { start, stop });
+            lines.push(line(text.len(), text.len()));
         }
 
         Buffer {
@@ -1211,11 +1251,17 @@ impl Buffer {
         let mut f = File::create(path)?;
 
         for i in 0..self.nlines() {
-            f.write_all(self.get_line(vek(0,i)))?;
+            f.write_all(self.line_get_slice(vek(0,i)))?;
             f.write_all(b"\n")?; // TODO: use platform's newline
         }
 
         Ok(())
+    }
+
+    fn snapshot(&mut self) {
+        let next_snapshot = self.current_snapshot.clone();
+        let prev_snapshot = replace(&mut self.current_snapshot, next_snapshot);
+        self.previous_snapshots.push(prev_snapshot);
     }
 
     fn nlines(&self) -> i32 {
@@ -1227,51 +1273,27 @@ impl Buffer {
         self.textbuffer.lines[idx].len()
     }
 
-    fn get_line<'a>(&'a self, offset: Vek) -> &'a[u8] {
+    fn line_index(&self, lineno: usize) -> usize {
+        self.current_snapshot.line_indexes[lineno]
+    }
+
+    fn line_get(&self, lineno: usize) -> Line {
+        self.textbuffer.lines[self.line_index(lineno)]
+    }
+
+    fn line_get_slice<'a>(&'a self, offset: Vek) -> &'a[u8] {
         let x = offset.x as usize;
         let y = offset.y as usize;
-        let line_idx = self.current_snapshot.line_indexes[y];
-        let line = self.textbuffer.lines[line_idx].to_slice(&self.textbuffer.text);
+        let line = self.line_get(y).to_slice(&self.textbuffer.text);
         shift(line, x)
-    }
-}
-
-impl Textbuffer {
-    // TODO: this need to support on-going append in the middle of a line !
-    //       todo that, add three parameters
-    //          the type of insert (insert(x_pos), append, replace(x_pos))
-    fn append(&mut self, c: char) {
-        if !is_printable(c) {
-            return
-        }
-
-        self.text.push(c as u8);
-        self.lines.last_mut().unwrap().stop += 1;
-
-        // TODO update cursor
-    }
-
-    fn emptyline(&mut self) -> usize {
-        let start = self.text.len();
-        let stop = start;
-        self.lines.push(Line { start, stop });
-
-        self.lines.len() - 1
-    }
-}
-
-// Buffer ops
-impl Buffer {
-    fn snapshot(&mut self) {
-        let next_snapshot = self.current_snapshot.clone();
-        let prev_snapshot = replace(&mut self.current_snapshot, next_snapshot);
-        self.previous_snapshots.push(prev_snapshot);
     }
 
     fn line_del(&mut self, y: usize) {
         check!(y < self.current_snapshot.line_indexes.len());
         self.snapshot();
         self.current_snapshot.line_indexes.remove(y);
+
+        // TODO: update all other views of that file whose cursors is below lineno
     }
 
     fn line_new(&mut self, lineno: usize) {
@@ -1282,6 +1304,20 @@ impl Buffer {
         }
 
         self.current_snapshot.line_indexes[lineno] = self.textbuffer.emptyline();
+
+        // TODO: update all other views of that file whose cursors is below lineno
+    }
+
+    fn line_break(&mut self, lineno: usize, colno: usize) {
+        let (left, right) = self.line_get(lineno).cut(colno);
+
+        self.line_new(lineno);
+        let left_idx = self.line_index(lineno);
+        let right_idx = self.line_index(lineno + 1);
+        self.textbuffer.lines[left_idx]  = left;
+        self.textbuffer.lines[right_idx] = right;
+
+        // TODO: update all other views of that file whose cursors is below lineno
     }
 
     fn undo(&mut self) {
@@ -1311,14 +1347,23 @@ impl Commandstate {
         match op {
             Movement(mvt)   => e.mv_cursor(mvt),
 
-            DelLine(lineno) => {
+            LineDel(pos) => {
+                let lineno = usize(pos.y);
                 e.buffer.snapshot();
                 e.buffer.line_del(lineno);
             }
 
-            NewLine(lineno) => {
+            LineNew(pos) => {
+                let lineno = usize(pos.y);
                 e.buffer.snapshot();
                 e.buffer.line_new(lineno);
+            }
+
+            LineBreak(pos) => {
+                let lineno = usize(pos.y);
+                let colno = usize(pos.x);
+                e.buffer.snapshot();
+                e.buffer.line_break(lineno, colno);
             }
 
             Undo => e.buffer.undo(), // TODO: implement redo stack
@@ -1339,16 +1384,24 @@ impl Commandstate {
 }
 
 impl Insertstate {
-    fn do_command(&mut self, op: InsertOp, e: &mut Editor) -> Re<Mode> {
+    fn do_insert(&mut self, op: InsertOp, e: &mut Editor) -> Re<Mode> {
         use InsertOp::*;
         match op {
-            BreakLine(cursor) =>
-                e.buffer.current_snapshot.line_indexes.push(e.buffer.textbuffer.emptyline()),
+            BreakLine(cursor) => {
+                // TODO: take into account cursor !
+                let newline = e.buffer.textbuffer.emptyline();
+                e.buffer.current_snapshot.line_indexes.push(newline)
+            }
 
-            Append(cursor, c) =>
-                e.buffer.textbuffer.append(c), // TODO: take into account cursor
+            Append(cursor, c) => {
+                // TODO: take into account cursor
+                e.buffer.textbuffer.append(c)
+                // TODO update cursor right there ?
+                // TODO: think abotu auto linebreak
+            }
 
-            SwitchCommand => return Ok(Mode::default_command_state),
+            SwitchCommand =>
+                return Ok(Mode::default_command_state),
 
             Noop => (),
         }
