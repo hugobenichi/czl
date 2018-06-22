@@ -41,7 +41,6 @@ macro_rules! er {
 /*
  * Features:
  *  - better navigation !
- *  - replace mode
  *  - copy and yank buffer
  *  - redo
  *  - cursor horizontal memory
@@ -54,6 +53,8 @@ macro_rules! er {
  *  - ctags support
  *
  * TODOs and cleanups
+ *  - BUG: why is there an empty last line at the end !!
+ *  - BUG: undo does not restore the cursor to previous point
  *  - migrate text snapshot to command list
  *  - fuzzer
  *  - handle resize
@@ -229,7 +230,7 @@ enum MovementMode {
 enum Mode {
     Command(Commandstate),
     Insert(Insertstate),
-    PendingInsert,
+    PendingInsert(InsertMode),
     Exit,
 }
 
@@ -239,6 +240,7 @@ struct Commandstate {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Insertstate {
+    mode: InsertMode,
 }
 
 // Left justified, fixed length strings.
@@ -253,20 +255,20 @@ impl Mode {
     fn footer_color(self) -> Colorcell {
         use Mode::*;
         match self {
-            Command(_)      => CONF.color_mode_command,
-            Insert(_)       => CONF.color_mode_insert,
-            PendingInsert   => CONF.color_mode_insert,
-            Exit            => CONF.color_mode_exit,
+            Command(_)          => CONF.color_mode_command,
+            Insert(_)           => CONF.color_mode_insert,
+            PendingInsert(_)    => CONF.color_mode_insert,
+            Exit                => CONF.color_mode_exit,
         }
     }
 
     fn name(self) -> &'static str {
         use Mode::*;
         match self {
-            Command(_)      => MODE_COMMAND,
-            Insert(_)       => MODE_INSERT,
-            PendingInsert   => MODE_PINSERT,
-            Exit            => MODE_EXIT,
+            Command(_)          => MODE_COMMAND,
+            Insert(_)           => MODE_INSERT,
+            PendingInsert(_)    => MODE_PINSERT,
+            Exit                => MODE_EXIT,
         }
     }
 
@@ -295,9 +297,9 @@ impl Mode {
                 state.do_insert(op, e)?
             }
 
-            PendingInsert => {
+            PendingInsert(mode) => {
                 e.buffer.snapshot();
-                let insertmode = Insert(e.buffer.start_insert(e.view.cursor));
+                let insertmode = Insert(Insertstate { mode });
                 Mode::process_input(insertmode, i, e)?
             }
 
@@ -329,6 +331,7 @@ impl Mode {
             Key('u')    => Undo,
             Key('U')    => Redo,
             Key('\t')   => SwitchInsert,
+            Key('r')    => SwitchReplace,
             Key('s')    => Save(format!("{}.tmp", e.view.filepath)),
             Key('\\')   => ClearConsole,
             Key('b')
@@ -427,6 +430,7 @@ enum CommandOp {
     Redo,
     Save(String),
     SwitchInsert,
+    SwitchReplace,
     ClearConsole,
     Noop,
 }
@@ -438,6 +442,11 @@ enum InsertOp {
     Noop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum InsertMode {
+    Insert,
+    Replace,
+}
 
 // Point to a place inside a Buffer
 struct Cursor<'a> {
@@ -1197,7 +1206,14 @@ impl Textbuffer {
         self.text[right.start] = c as u8;
     }
 
-    // TODO: replace char mode
+    fn replace(&mut self, colno: usize, c: char) {
+        let line = *self.lines.last().unwrap();
+        if colno == line.len() {
+            self.append(' ');
+        }
+
+        self.text[line.start + colno] = c as u8;
+    }
 
     fn emptyline(&mut self) -> usize {
         self.lines.push(line(self.text.len(), self.text.len()));
@@ -1250,6 +1266,10 @@ impl Buffer {
                 };
                 lines.push(line(a, b));
                 a = b + 1; // skip the '\n'
+
+//                if lines.len() == 20 {
+//                    break;
+//                }
             }
         }
 
@@ -1355,7 +1375,10 @@ impl Buffer {
         }
     }
 
-    fn insert(&mut self, lineno: usize, colno: usize, c: char) {
+    fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) {
+        // prepare buffer for insertion: modified line must be copied.
+        // BUG: this probably needs to be only done on the first PendingInsert thing
+        // actually !
         let last_idx = self.textbuffer.lines.len() - 1;
         let line_idx = self.line_index(lineno);
         if line_idx != last_idx {
@@ -1363,24 +1386,17 @@ impl Buffer {
             self.current_snapshot.line_indexes[lineno] = newline_idx;
         }
 
-        self.textbuffer.insert(colno, c);
+        match mode {
+            InsertMode::Insert  => self.textbuffer.insert(colno, c),
+            InsertMode::Replace => self.textbuffer.replace(colno, c),
+        }
     }
-
-    fn start_insert(&mut self, cursor: Vek) -> Insertstate {
-        // TODO !
-        Insertstate { }
-    }
-
-    fn stop_insert(&mut self, cursor: Vek) {
-        // TODO: do I need this ?
-    }
-
-    // TODO: append mode, replace mode
 }
 
 impl Commandstate {
     fn do_command(&mut self, op: CommandOp, e: &mut Editor) -> Re<Mode> {
         use CommandOp::*;
+        use Mode::*;
         match op {
             Movement(mvt)   => e.mv_cursor(mvt),
 
@@ -1406,20 +1422,31 @@ impl Commandstate {
                 e.view.cursor = vek(0, y + 1);
             }
 
-            Undo => e.buffer.undo(), // TODO: implement redo stack
+            Undo => {
+                // TODO: restore the cursor !!
+                e.buffer.undo();
+            }
 
-            Redo => (), // TODO !
+            Redo => (), // TODO: implement redo stack
 
             Save(path) => e.buffer.to_file(&path)?,
 
             ClearConsole => Debugconsole::clear(),
 
-            SwitchInsert => return Ok(Mode::PendingInsert),
+            SwitchInsert => {
+                let mode = InsertMode::Insert;
+                return Ok(PendingInsert(mode))
+            }
+
+            SwitchReplace => {
+                let mode = InsertMode::Replace;
+                return Ok(PendingInsert(mode))
+            }
 
             Noop => (),
         }
 
-        Ok(Mode::Command(replace(self, Commandstate { })))
+        Ok(Command(replace(self, Commandstate { })))
     }
 }
 
@@ -1434,11 +1461,12 @@ impl Insertstate {
 
             CharInsert(Vek { x, y }, c) => {
                 if is_printable(c) {
-                    e.buffer.insert(usize(y), usize(x), c);
+                    e.buffer.insert(self.mode, usize(y), usize(x), c);
                     e.view.cursor = vek(x + 1, y);
                     // TODO: think about auto linebreak
                 }
             }
+
 
             SwitchCommand =>
                 return Ok(Mode::default_command_state),
@@ -1446,7 +1474,8 @@ impl Insertstate {
             Noop => (),
         }
 
-        Ok(Mode::Insert(replace(self, Insertstate { })))
+        // TODO: can I  just return something new and dorp self here ???
+        Ok(Mode::Insert(replace(self, Insertstate { mode: InsertMode::Insert })))
     }
 }
 
