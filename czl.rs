@@ -40,6 +40,9 @@ macro_rules! er {
 
 /*
  * Features:
+ *  - delete and backspace in insert mode
+ *  - dirty file indicator
+ *  - offer to save if panic
  *  - better navigation !
  *  - copy and yank buffer
  *  - redo
@@ -48,7 +51,6 @@ macro_rules! er {
  *  - directory explorer
  *  - recenter screen
  *  - grep move
- *  - dirty file indicator
  *  - cursor previous points and cursor markers
  *  - ctags support
  *
@@ -323,6 +325,11 @@ impl Mode {
             Key('j')    => Movement(Move::Down),
             Key('k')    => Movement(Move::Up),
             Key('l')    => Movement(Move::Right),
+            Key(' ')    => Recenter,
+            Key(CTRL_D)   => PageDown,
+            Key(CTRL_U)   => PageUp,
+            Key(CTRL_H)   => FileStart,
+            Key(CTRL_L)   => FileEnd,
             // TODO: Consider changing to Mut(LineOp, cursor) for something more systematic ?
             Key('o')    => LineNew(e.view.cursor),
             //Key('O')    => LineNew(e.view.cursor), // Implement with multi command !
@@ -349,6 +356,7 @@ impl Mode {
             Key(ESC) | EscZ => SwitchCommand,
             Key(ENTER)      => LineBreak(e.view.cursor),
             Key(c)          => CharInsert(e.view.cursor, c),
+            // TODO: Delete and backspace
             _ => Noop,
         }
     }
@@ -422,10 +430,15 @@ fn line(start: usize, stop: usize) -> Line {
 }
 
 enum CommandOp {
+    Movement(Move),
+    Recenter,
+    PageUp,
+    PageDown,
+    FileStart,
+    FileEnd,
     LineDel(Vek),
     LineNew(Vek),
     LineBreak(Vek),
-    Movement(Move),
     Undo,
     Redo,
     Save(String),
@@ -526,6 +539,30 @@ impl View {
 
             self.filearea = self.filearea + vek(dx, dy);
         }
+    }
+
+    fn recenter(&mut self, buffer: &Buffer) {
+        let size = self.filearea.size();
+        let y = max(0, self.cursor.y - size.y / 2);
+        self.filearea = vek(self.cursor.x, y).extrude(size);
+    }
+
+    fn go_page_down(&mut self, buffer: &Buffer) {
+        let y = min(buffer.nlines() - 1, self.cursor.y + 50);
+        self.cursor = vek(self.cursor.x, y);
+    }
+
+    fn go_page_up(&mut self, buffer: &Buffer) {
+        let y = max(0, self.cursor.y - 50);
+        self.cursor = vek(self.cursor.x, y);
+    }
+
+    fn go_file_start(&mut self, buffer: &Buffer) {
+        self.cursor = vek(self.cursor.x, 0);
+    }
+
+    fn go_file_end(&mut self, buffer: &Buffer) {
+        self.cursor = vek(self.cursor.x, buffer.nlines() - 1);
     }
 }
 
@@ -1267,7 +1304,7 @@ impl Buffer {
                 lines.push(line(a, b));
                 a = b + 1; // skip the '\n'
 
-//                if lines.len() == 20 {
+//                if lines.len() == 40 {
 //                    break;
 //                }
             }
@@ -1398,7 +1435,23 @@ impl Commandstate {
         use CommandOp::*;
         use Mode::*;
         match op {
-            Movement(mvt)   => e.mv_cursor(mvt),
+            Movement(mvt)=>
+                e.mv_cursor(mvt),
+
+            Recenter =>
+                e.view.recenter(&e.buffer),
+
+            PageUp =>
+                e.view.go_page_up(&e.buffer),
+
+            PageDown =>
+                e.view.go_page_down(&e.buffer),
+
+            FileStart =>
+                e.view.go_file_start(&e.buffer),
+
+            FileEnd =>
+                e.view.go_file_end(&e.buffer),
 
             LineDel(pos) => {
                 if e.buffer.nlines() > 0 {
@@ -1748,51 +1801,100 @@ impl fmt::Display for Input {
             EscZ                            => f.write_str(&"EscZ"),
             Resize                          => f.write_str(&"Resize"),
             Error                           => f.write_str(&"Error"),
-            Key(NO_KEY)                     => f.write_str(&"No input"),
-            Key(CTRL_C)                     => f.write_str(&"CTRL_C"),
-            Key(CTRL_D)                     => f.write_str(&"CTRL_D"),
-            Key(CTRL_F)                     => f.write_str(&"CTRL_F"),
-            Key(CTRL_H)                     => f.write_str(&"CTRL_H"),
-            Key(TAB)                        => f.write_str(&"TAB"),
-            Key(LINE_FEED)                  => f.write_str(&"LINE_FEED"),
-            Key(VTAB)                       => f.write_str(&"VTAB"),
-            Key(NEW_PAGE)                   => f.write_str(&"NEW_PAGE"),
-            Key(ENTER)                      => f.write_str(&"ENTER"),
-            Key(CTRL_Q)                     => f.write_str(&"CTRL_Q"),
-            Key(CTRL_S)                     => f.write_str(&"CTRL_S"),
-            Key(CTRL_U)                     => f.write_str(&"CTRL_U"),
-            Key(CTRL_Z)                     => f.write_str(&"CTRL_Z"),
-            Key(ESC)                        => f.write_str(&"ESC"),
-            Key(BACKSPACE)                  => f.write_str(&"BACKSPACE"),
-            Key(c)                          => write!(f, "'{}'", c),
+            Key(c)                          => Input::fmt_key_name(*c, f),
             Click(Vek { x, y })             => write!(f, "click ({},{})'", y, x),
             ClickRelease(Vek { x, y })      => write!(f, "unclick ({},{})'", y, x),
         }
     }
 }
 
-const NO_KEY    : char = 0 as char;
-const CTRL_C    : char = 3 as char;       // end of text
-const CTRL_D    : char = 4 as char;       // end of transmission
-const CTRL_F    : char = 6 as char;
-const CTRL_H    : char = 8 as char;
-const TAB       : char = 9 as char;       // also ctrl + i
-const LINE_FEED : char = 10 as char;      // also ctrl + j
-const VTAB      : char = 11 as char;      // also ctrl + k
-const NEW_PAGE  : char = 12 as char;      // also ctrl + l
-const ENTER     : char = 13 as char;
-const CTRL_Q    : char = 17 as char;
-const CTRL_S    : char = 19 as char;
-const CTRL_U    : char = 21 as char;
-const CTRL_Z    : char = 26 as char;
-const ESC       : char = 27 as char;      // also ctrl + [
-const BACKSPACE : char = 127 as char;
+impl Input {
+    fn fmt_key_name(c: char, f: &mut fmt::Formatter) -> fmt::Result {
+        match c {
+            CTRL_AT             => f.write_str(&"^@"),
+            CTRL_A              => f.write_str(&"^A"),
+            CTRL_B              => f.write_str(&"^B"),
+            CTRL_C              => f.write_str(&"^C"),
+            CTRL_D              => f.write_str(&"^D"),
+            CTRL_E              => f.write_str(&"^E"),
+            CTRL_F              => f.write_str(&"^F"),
+            CTRL_G              => f.write_str(&"^G"),
+            BACKSPACE           => f.write_str(&"Backspace"),
+            TAB                 => f.write_str(&"TAB"),
+            CTRL_J              => f.write_str(&"^J"),
+            CTRL_K              => f.write_str(&"^K"),
+            CTRL_L              => f.write_str(&"^L"),
+            ENTER               => f.write_str(&"Enter"),
+            CTRL_N              => f.write_str(&"^N"),
+            CTRL_O              => f.write_str(&"^O"),
+            CTRL_P              => f.write_str(&"^P"),
+            CTRL_Q              => f.write_str(&"^Q"),
+            CTRL_R              => f.write_str(&"^R"),
+            CTRL_S              => f.write_str(&"^S"),
+            CTRL_T              => f.write_str(&"^T"),
+            CTRL_U              => f.write_str(&"^U"),
+            CTRL_V              => f.write_str(&"^V"),
+            CTRL_W              => f.write_str(&"^W"),
+            CTRL_X              => f.write_str(&"^X"),
+            CTRL_Y              => f.write_str(&"^Y"),
+            CTRL_Z              => f.write_str(&"^Z"),
+            ESC                 => f.write_str(&"Esc"),
+            CTRL_BACKSLASH      => f.write_str(&"^\\"),
+            CTRL_RIGHT_BRACKET  => f.write_str(&"^]"),
+            CTRL_CARET          => f.write_str(&"^^"),
+            CTRL_UNDERSCORE     => f.write_str(&"^_"),
+            DEL                 => f.write_str(&"Del"),
+            _                   => write!(f,"{}", c),
+        }
+    }
+}
 
-const RESIZE    : char = 255 as char; //'\xff';
+const CTRL_AT               : char = '\x00';
+const CTRL_A                : char = '\x01';
+const CTRL_B                : char = '\x02';
+const CTRL_C                : char = '\x03';
+const CTRL_D                : char = '\x04';
+const CTRL_E                : char = '\x05';
+const CTRL_F                : char = '\x06';
+const CTRL_G                : char = '\x07';
+const CTRL_H                : char = '\x08';
+const CTRL_I                : char = '\x09';
+const CTRL_J                : char = '\x0a';
+const CTRL_K                : char = '\x0b';
+const CTRL_L                : char = '\x0c';
+const CTRL_M                : char = '\x0d';
+const CTRL_N                : char = '\x0e';
+const CTRL_O                : char = '\x0f';
+const CTRL_P                : char = '\x10';
+const CTRL_Q                : char = '\x11';
+const CTRL_R                : char = '\x12';
+const CTRL_S                : char = '\x13';
+const CTRL_T                : char = '\x14';
+const CTRL_U                : char = '\x15';
+const CTRL_V                : char = '\x16';
+const CTRL_W                : char = '\x17';
+const CTRL_X                : char = '\x18';
+const CTRL_Y                : char = '\x19';
+const CTRL_Z                : char = '\x1a';
+const CTRL_LEFT_BRACKET     : char = '\x1b';
+const CTRL_BACKSLASH        : char = '\x1c';
+const CTRL_RIGHT_BRACKET    : char = '\x1d';
+const CTRL_CARET            : char = '\x1e';
+const CTRL_UNDERSCORE       : char = '\x1f';
+const DEL                   : char = '\x7f';
+const ESC                   : char = CTRL_LEFT_BRACKET;
+const BACKSPACE             : char = CTRL_H;
+const TAB                   : char = CTRL_I;
+const LINE_FEED             : char = CTRL_J;
+const VTAB                  : char = CTRL_K;
+const NEW_PAGE              : char = CTRL_L;
+const ENTER                 : char = CTRL_M;
+
+const RESIZE                : char = 255 as char; //'\xff';
 
 
 fn is_printable(c : char) -> bool {
-    ESC < c && c < BACKSPACE
+    ESC < c && c < DEL
 }
 
 //fn read_char() -> Re<char> {
