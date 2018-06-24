@@ -94,6 +94,8 @@ const CONF : Config = Config {
     color_mode_command:     Colorcell { fg: Color::Gray(1), bg: Color::Black },
     color_mode_insert:      Colorcell { fg: Color::Gray(1), bg: Color::Red },
     color_mode_exit:        Colorcell { fg: Color::Magenta, bg: Color::Magenta },
+
+    logfile:                &"/tmp/czl.log",
 };
 
 
@@ -146,6 +148,8 @@ struct Config {
     color_mode_command:     Colorcell,
     color_mode_insert:      Colorcell,
     color_mode_exit:        Colorcell,
+
+    logfile:                &'static str,
 }
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
@@ -1659,6 +1663,12 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
 }
 
 
+// TODO: persist the file handle instead of opening/closing at every frame ...
+fn logd<'a>(m: &'a str) {
+    let mut file = fs::OpenOptions::new().read(true).append(true).open(&CONF.logfile).unwrap();
+    file.write(m.as_bytes()).unwrap();
+}
+
 fn main() {
     let term = Term::set_raw().unwrap();
 
@@ -1918,6 +1928,7 @@ fn push_char(chan: &SyncSender<char>) {
     loop {
         let n = stdin.read(&mut buf).unwrap(); // TODO: pass error through the channel ?
         if n == 1 {
+            logd(&format!("input: {}/{}\n", buf[0], buf[0] as char));
             chan.send(buf[0] as char).unwrap();
         }
     }
@@ -1925,7 +1936,6 @@ fn push_char(chan: &SyncSender<char>) {
 
 fn pull_input(chan: &Receiver<char>) -> Re<Input> {
     use Input::*;
-    //use std::sync::mpsc::TryRecvError;
     use std::sync::mpsc::TryRecvError::*;
 
     let c = chan.recv()?;
@@ -1941,9 +1951,10 @@ fn pull_input(chan: &Receiver<char>) -> Re<Input> {
     // Escape: if no more char immediately available, return ESC, otherwise parse an escape sequence
 
     match chan.try_recv() {
-        Ok(c)       => check!(c == '['),   // This was an escape sequence, continue parsing
-        Err(Empty)  => return Ok(Key(ESC)), // Nothing to read: this was an escape
-        Err(e)      => return er!(e.description()),
+        Ok(c) if c == '['       => (),                          // Escape sequence: continue parsing
+        Ok(c)                   => return Ok(UnknownEscSeq),    // Error while parsing: bail out
+        Err(Empty)              => return Ok(Key(ESC)),         // Nothing more: this was just an escape key
+        Err(e)                  => return er!(e.description()),
     }
 
     match chan.recv()? {
