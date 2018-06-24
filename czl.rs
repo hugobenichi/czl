@@ -1918,42 +1918,50 @@ impl fmt::Display for Input {
 }
 
 impl Input {
+    fn key_descr(c: char) -> Option<&'static str> {
+        let r = match c {
+            CTRL_AT             => &"^@",
+            CTRL_A              => &"^A",
+            CTRL_B              => &"^B",
+            CTRL_C              => &"^C",
+            CTRL_D              => &"^D",
+            CTRL_E              => &"^E",
+            CTRL_F              => &"^F",
+            CTRL_G              => &"^G",
+            BACKSPACE           => &"Backspace",
+            TAB                 => &"TAB",
+            CTRL_J              => &"^J",
+            CTRL_K              => &"^K",
+            CTRL_L              => &"^L",
+            ENTER               => &"Enter",
+            CTRL_N              => &"^N",
+            CTRL_O              => &"^O",
+            CTRL_P              => &"^P",
+            CTRL_Q              => &"^Q",
+            CTRL_R              => &"^R",
+            CTRL_S              => &"^S",
+            CTRL_T              => &"^T",
+            CTRL_U              => &"^U",
+            CTRL_V              => &"^V",
+            CTRL_W              => &"^W",
+            CTRL_X              => &"^X",
+            CTRL_Y              => &"^Y",
+            CTRL_Z              => &"^Z",
+            ESC                 => &"Esc",
+            CTRL_BACKSLASH      => &"^\\",
+            CTRL_RIGHT_BRACKET  => &"^]",
+            CTRL_CARET          => &"^^",
+            CTRL_UNDERSCORE     => &"^_",
+            DEL                 => &"Del",
+            _                   => return None,
+        };
+        Some(r)
+    }
+
     fn fmt_key_name(c: char, f: &mut fmt::Formatter) -> fmt::Result {
-        match c {
-            CTRL_AT             => f.write_str(&"^@"),
-            CTRL_A              => f.write_str(&"^A"),
-            CTRL_B              => f.write_str(&"^B"),
-            CTRL_C              => f.write_str(&"^C"),
-            CTRL_D              => f.write_str(&"^D"),
-            CTRL_E              => f.write_str(&"^E"),
-            CTRL_F              => f.write_str(&"^F"),
-            CTRL_G              => f.write_str(&"^G"),
-            BACKSPACE           => f.write_str(&"Backspace"),
-            TAB                 => f.write_str(&"TAB"),
-            CTRL_J              => f.write_str(&"^J"),
-            CTRL_K              => f.write_str(&"^K"),
-            CTRL_L              => f.write_str(&"^L"),
-            ENTER               => f.write_str(&"Enter"),
-            CTRL_N              => f.write_str(&"^N"),
-            CTRL_O              => f.write_str(&"^O"),
-            CTRL_P              => f.write_str(&"^P"),
-            CTRL_Q              => f.write_str(&"^Q"),
-            CTRL_R              => f.write_str(&"^R"),
-            CTRL_S              => f.write_str(&"^S"),
-            CTRL_T              => f.write_str(&"^T"),
-            CTRL_U              => f.write_str(&"^U"),
-            CTRL_V              => f.write_str(&"^V"),
-            CTRL_W              => f.write_str(&"^W"),
-            CTRL_X              => f.write_str(&"^X"),
-            CTRL_Y              => f.write_str(&"^Y"),
-            CTRL_Z              => f.write_str(&"^Z"),
-            ESC                 => f.write_str(&"Esc"),
-            CTRL_BACKSLASH      => f.write_str(&"^\\"),
-            CTRL_RIGHT_BRACKET  => f.write_str(&"^]"),
-            CTRL_CARET          => f.write_str(&"^^"),
-            CTRL_UNDERSCORE     => f.write_str(&"^_"),
-            DEL                 => f.write_str(&"Del"),
-            _                   => write!(f,"{}", c),
+        match Input::key_descr(c) {
+            Some(s) => f.write_str(s),
+            None    => write!(f,"{}", c),
         }
     }
 }
@@ -2027,7 +2035,11 @@ fn push_char(chan: &SyncSender<char>) {
     loop {
         let n = stdin.read(&mut buf).unwrap(); // TODO: pass error through the channel ?
         if n == 1 {
-            logd(&format!("input: {}/{}\n", buf[0], buf[0] as char));
+            let c = buf[0];
+            let d = match Input::key_descr(c as char) {
+                Some(s) => logd(&format!("input: {}/{}\n", c, s)),
+                None    => logd(&format!("input: {}/{}\n", c, c as char)),
+            };
             chan.send(buf[0] as char).unwrap();
         }
     }
