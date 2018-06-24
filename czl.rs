@@ -40,7 +40,7 @@ macro_rules! er {
 
 /*
  * Features:
- *  - delete and backspace in insert mode
+ *  - delete and backspace in command mode
  *  - dirty file indicator
  *  - offer to save if panic
  *  - better navigation !
@@ -55,6 +55,9 @@ macro_rules! er {
  *  - ctags support
  *
  * TODOs and cleanups
+ *  - introduce modules and cleanly separate code
+ *  - need to implement char/line next/previous
+ *  - BUG: double check Buffer::delete
  *  - BUG: why is there an empty last line at the end !!
  *  - BUG: undo does not restore the cursor to previous point
  *  - migrate text snapshot to command list
@@ -357,11 +360,12 @@ impl Mode {
         use Input::*;
         use InsertOp::*;
         match i {
-            Key(ESC) | EscZ => SwitchCommand,
-            Key(ENTER)      => LineBreak(e.view.cursor),
-            Key(c)          => CharInsert(e.view.cursor, c),
-            // TODO: Delete and backspace
-            _ => Noop,
+            Key(ESC) | EscZ                 => SwitchCommand,
+            Key(ENTER)                      => LineBreak(e.view.cursor),
+            Key(c) if c == BACKSPACE        => Backspace(e.view.cursor),
+            Key(c) if c == DEL              => Delete(e.view.cursor),
+            Key(c)                          => CharInsert(e.view.cursor, c),
+            _                               => Noop,
         }
     }
 }
@@ -402,7 +406,7 @@ enum Draw {
     Text,
 }
 
-struct Textbuffer {
+struct Text {
     text:   Vec<u8>,    // original content of the file when loaded
     lines:  Vec<Line>,  // subslices into the buffer or appendbuffer
 }
@@ -416,7 +420,7 @@ struct Textsnapshot {
 // Q: can I have a vec in a struct and another subslice pointing into that vec ?
 //    I would need to say that they both have the same lifetime as the struct.
 struct Buffer {
-    textbuffer:             Textbuffer,
+    textbuffer:             Text,
     previous_snapshots:     Vec<Textsnapshot>,
     current_snapshot:       Textsnapshot,
 }
@@ -433,6 +437,7 @@ fn line(start: usize, stop: usize) -> Line {
     Line { start , stop }
 }
 
+// TODO: split into movement ops, buffer ops, + misc
 enum CommandOp {
     Movement(Move),
     Recenter,
@@ -452,9 +457,12 @@ enum CommandOp {
     Noop,
 }
 
+// CLEANUP: do I need Vek here ? Or is it implicitly wrt to the cursor of a the given view ?
 enum InsertOp {
     LineBreak(Vek),
     CharInsert(Vek, char),
+    Delete(Vek),
+    Backspace(Vek),
     SwitchCommand,
     Noop,
 }
@@ -1216,6 +1224,10 @@ impl<'a> Screen<'a> {
 
 
 impl Line {
+    fn char_at(self, text: &[u8], colno: usize) -> char {
+        text[self.start + colno] as char
+    }
+
     fn to_slice<'a>(self, text: &'a[u8]) -> &'a[u8] {
         &text[self.start..self.stop]
     }
@@ -1231,7 +1243,7 @@ impl Line {
     }
 }
 
-impl Textbuffer {
+impl Text {
     fn append(&mut self, c: char) {
         self.text.push(c as u8);
         self.lines.last_mut().unwrap().stop += 1;
@@ -1241,6 +1253,7 @@ impl Textbuffer {
         let (left, right) = self.lines.last().unwrap().cut(colno);
         self.append(' ');
 
+// CLEANUP: use Vec.insert instead
         for i in (right.start..right.stop).rev() {
             self.text[i+1] = self.text[i];
         }
@@ -1249,6 +1262,8 @@ impl Textbuffer {
 
     fn replace(&mut self, colno: usize, c: char) {
         let line = *self.lines.last().unwrap();
+
+// CLEANUP: use Vec.insert instead ?
         if colno == line.len() {
             self.append(' ');
         }
@@ -1258,7 +1273,6 @@ impl Textbuffer {
 
     fn emptyline(&mut self) -> usize {
         self.lines.push(line(self.text.len(), self.text.len()));
-
         self.lines.len() - 1
     }
 
@@ -1280,6 +1294,7 @@ impl Textbuffer {
     }
 }
 
+// TODO: this should implement array bracket notation ?
 impl Buffer {
     fn from_file(path: &str) -> Re<Buffer> {
         let text = file_load(path)?;
@@ -1327,7 +1342,7 @@ impl Buffer {
         }
 
         Buffer {
-            textbuffer:         Textbuffer { text, lines },
+            textbuffer:         Text { text, lines },
             previous_snapshots: Vec::new(),
             current_snapshot:   Textsnapshot { line_indexes },
         }
@@ -1351,8 +1366,16 @@ impl Buffer {
         self.previous_snapshots.push(prev_snapshot);
     }
 
+    fn char_at(&self, lineno: usize, colno: usize) -> char {
+        self.line_get(lineno).char_at(&self.textbuffer.text, colno)
+    }
+
     fn nlines(&self) -> i32 {
         i32(self.current_snapshot.line_indexes.len())
+    }
+
+    fn last_line(&self) -> usize {
+        self.current_snapshot.line_indexes.len() - 1
     }
 
     fn line_len(&self, y: usize) -> usize {
@@ -1368,6 +1391,11 @@ impl Buffer {
         self.textbuffer.lines[self.line_index(lineno)]
     }
 
+    fn line_set(&mut self, lineno: usize, line: Line) {
+        let line_idx = self.line_index(lineno);
+        self.textbuffer.lines[line_idx] = line;
+    }
+
     fn line_get_slice<'a>(&'a self, offset: Vek) -> &'a[u8] {
         let x = offset.x as usize;
         let y = offset.y as usize;
@@ -1377,7 +1405,6 @@ impl Buffer {
 
     fn line_del(&mut self, y: usize) {
         check!(y < self.current_snapshot.line_indexes.len());
-        self.snapshot();
         self.current_snapshot.line_indexes.remove(y);
 
         // TODO: update all other views of that file whose cursors is below lineno
@@ -1386,6 +1413,7 @@ impl Buffer {
     fn line_new(&mut self, lineno: usize) {
         let lastline = self.current_snapshot.line_indexes.len() - 1;
         self.current_snapshot.line_indexes.reserve(1);
+// CLEANUP: use Vec.insert
         for i in (lineno..lastline).rev() {
             self.current_snapshot.line_indexes[i+1] = self.current_snapshot.line_indexes[i];
         }
@@ -1405,6 +1433,64 @@ impl Buffer {
         self.textbuffer.lines[right_idx] = right;
 
         // TODO: update all other views of that file whose cursors is below lineno
+    }
+
+    // CHECK: from/to should be inclusive
+    fn delete(&mut self, from: Vek, to: Vek) {
+        let mut y_start = usize(from.y);
+        let mut y_stop = usize(to.y);
+
+        check!(y_start <= y_stop);
+
+        // Case 1: delete a range in a single line
+        if y_start == y_stop {
+            let line = self.line_get(y_start);
+
+            let newlen = line.len() - usize(to.x - from.x);
+            let newline_idx = self.textbuffer.emptyline();
+            self.current_snapshot.line_indexes[y_start] = newline_idx;
+            self.textbuffer.text.reserve(newlen);
+
+            for i in 0..usize(from.x) {
+                let c =  line.char_at(&self.textbuffer.text, i);
+                self.textbuffer.append(c);
+            }
+            for i in usize(to.x)..line.len() {
+                let c =  line.char_at(&self.textbuffer.text, i);
+                self.textbuffer.append(c);
+            }
+
+            return
+        }
+
+        // Case 2: delete more than one line.
+        //          1) trim the first line on the right
+        //          2) trim the last line on the left
+        //          3) delete any line in between
+        if from.x != 0 {
+            let (keep, _) = self.line_get(y_start).cut(usize(from.x));
+            self.line_set(y_start, keep);
+            y_start += 1;
+        }
+
+        let last_cut_line = self.line_get(y_stop);
+        if usize(to.x) != last_cut_line.len() {
+            let (_, keep) = last_cut_line.cut(usize(to.x));
+            self.line_set(y_stop, keep);
+            y_stop -= 1;
+        }
+
+        let gap = y_stop - y_start;
+        if gap > 0 {
+            for i in y_stop..self.last_line() {
+                let line_idx = self.current_snapshot.line_indexes[i];
+                self.current_snapshot.line_indexes[i - gap] = line_idx;
+            }
+            unsafe {
+                let new_nlines = usize(self.nlines()) - gap;
+                self.current_snapshot.line_indexes.set_len(new_nlines);
+            }
+        }
     }
 
     fn undo(&mut self) {
@@ -1524,6 +1610,19 @@ impl Insertstate {
                 }
             }
 
+            Delete(pos) => {
+                // BUG: this should use char next instead, for handling end of line
+                e.buffer.delete(pos, pos + vek(1,0))
+            }
+
+            Backspace(pos) => {
+                // BUG: this should use char previous instead, for handling start of line
+                if pos.x > 0 {
+                    let newpos = pos - vek(1,0);
+                    e.buffer.delete(newpos, pos);
+                    e.view.cursor = newpos;
+                }
+            }
 
             SwitchCommand =>
                 return Ok(Mode::default_command_state),
