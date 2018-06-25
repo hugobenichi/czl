@@ -22,6 +22,8 @@ use std::sync::mpsc;
 use std::thread;
 
 
+use geometry::*;
+
 macro_rules! check {
     ($test:expr, $cause:expr) => {
         assert!($test, format!("{}:{} cause: {}", file!(), line!(), $cause))
@@ -109,7 +111,7 @@ const CONF : Config = Config {
 
 // The core editor structure
 struct Editor {
-    window:         Vek,              // The dimensions of the editor and backend terminal window
+    window:         Pos,              // The dimensions of the editor and backend terminal window
     mainscreen:     Rec,              // The screen area for displaying file content and menus.
     footer:         Rec,
     framebuffer:    Framebuffer,
@@ -153,22 +155,6 @@ struct Config {
     color_mode_exit:        Colorcell,
 
     logfile:                &'static str,
-}
-
-// Either a position in 2d space w.r.t to (0,0), or a movement quantity
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Vek { // Vec was already taken ...
-    x: i32,
-    y: i32,
-}
-
-// A simple rectangle
-// In general, the top-most raw and left-most column should be inclusive (min),
-// and the bottom-most raw and right-most column should be exclusive (max).
-#[derive(Debug, Clone, Copy)]
-struct Rec {
-    min: Vek,   // point the closest to (0,0)
-    max: Vek,   // point the farthest to (0,0)
 }
 
 type Colorcode = i32;
@@ -372,7 +358,7 @@ impl Mode {
 
 // The struct that manages compositing.
 struct Framebuffer {
-    window:     Vek,
+    window:     Pos,
     len:        i32,
 
     text:       Vec<u8>,
@@ -380,7 +366,7 @@ struct Framebuffer {
                 // for color -> u8 -> control string conversions
     fg:         Vec<Color>,
     bg:         Vec<Color>,
-    cursor:     Vek,            // Absolute screen coordinate relative to (0,0).
+    cursor:     Pos,            // Absolute screen coordinate relative to (0,0).
 
     buffer:     Vec<u8>,
 }
@@ -445,9 +431,9 @@ enum CommandOp {
     PageDown,
     FileStart,
     FileEnd,
-    LineDel(Vek),
-    LineNew(Vek),
-    LineBreak(Vek),
+    LineDel(Pos),
+    LineNew(Pos),
+    LineBreak(Pos),
     Undo,
     Redo,
     Save(String),
@@ -457,12 +443,12 @@ enum CommandOp {
     Noop,
 }
 
-// CLEANUP: do I need Vek here ? Or is it implicitly wrt to the cursor of a the given view ?
+// CLEANUP: do I need Pos here ? Or is it implicitly wrt to the cursor of a the given view ?
 enum InsertOp {
-    LineBreak(Vek),
-    CharInsert(Vek, char),
-    Delete(Vek),
-    Backspace(Vek),
+    LineBreak(Pos),
+    CharInsert(Pos, char),
+    Delete(Pos),
+    Backspace(Pos),
     SwitchCommand,
     Noop,
 }
@@ -488,14 +474,14 @@ struct View {
     show_neighbor:      bool,
     show_selection:     bool,
     is_active:          bool,
-    cursor:             Vek,
-    cursor_memory:      Vek,
+    cursor:             Pos,
+    cursor_memory:      Pos,
     filearea:           Rec,
     //selection:  Option<&[Selection]>
 }
 
 impl View {
-    fn mk_fileview(filepath: String, screensize: Vek) -> View {
+    fn mk_fileview(filepath: String, screensize: Pos) -> View {
         View {
             filepath,
             relative_lineno:    CONF.relative_lineno,
@@ -504,8 +490,8 @@ impl View {
             show_neighbor:      false,
             show_selection:     false,
             is_active:          true,
-            cursor:             vek(0,0),
-            cursor_memory:      vek(0,0),
+            cursor:             pos(0,0),
+            cursor_memory:      pos(0,0),
             filearea:           screensize.rec(),
         }
     }
@@ -549,32 +535,32 @@ impl View {
                 dx = p.x + 1 - self.filearea.max.x;
             }
 
-            self.filearea = self.filearea + vek(dx, dy);
+            self.filearea = self.filearea + pos(dx, dy);
         }
     }
 
     fn recenter(&mut self, buffer: &Buffer) {
         let size = self.filearea.size();
         let y = max(0, self.cursor.y - size.y / 2);
-        self.filearea = vek(self.cursor.x, y).extrude(size);
+        self.filearea = pos(self.cursor.x, y).extrude(size);
     }
 
     fn go_page_down(&mut self, buffer: &Buffer) {
         let y = min(buffer.nlines() - 1, self.cursor.y + 50);
-        self.cursor = vek(self.cursor.x, y);
+        self.cursor = pos(self.cursor.x, y);
     }
 
     fn go_page_up(&mut self, buffer: &Buffer) {
         let y = max(0, self.cursor.y - 50);
-        self.cursor = vek(self.cursor.x, y);
+        self.cursor = pos(self.cursor.x, y);
     }
 
     fn go_file_start(&mut self, buffer: &Buffer) {
-        self.cursor = vek(self.cursor.x, 0);
+        self.cursor = pos(self.cursor.x, 0);
     }
 
     fn go_file_end(&mut self, buffer: &Buffer) {
-        self.cursor = vek(self.cursor.x, buffer.nlines() - 1);
+        self.cursor = pos(self.cursor.x, buffer.nlines() - 1);
     }
 }
 
@@ -586,46 +572,74 @@ impl View {
 
 /* CORE TYPES IMPLS */
 
-fn vek(x: i32, y: i32) -> Vek {
-    Vek { x, y }
+// TODO: better name for that
+mod geometry {
+
+    use std;
+    use fmt;
+
+// Either a position in 2d space w.r.t to (0,0), or a movement quantity
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pos { // Vec was already taken ...
+    pub x: i32,
+    pub y: i32,
+}
+
+// A simple rectangle
+// In general, the top-most raw and left-most column should be inclusive (min),
+// and the bottom-most raw and right-most column should be exclusive (max).
+#[derive(Debug, Clone, Copy)]
+pub struct Rec {
+    pub min: Pos,   // point the closest to (0,0)
+    pub max: Pos,   // point the farthest to (0,0)
+}
+
+pub fn pos(x: i32, y: i32) -> Pos {
+    Pos { x, y }
 }
 
 // TODO: rec ctor with width and height ??
-fn rec(x0: i32, y0: i32, x1: i32, y1: i32) -> Rec {
+pub fn rec(x0: i32, y0: i32, x1: i32, y1: i32) -> Rec {
     let (a0, a1) = ordered(x0, x1);
     let (b0, b1) = ordered(y0, y1);
     Rec {
-        min: vek(a0, b0),
-        max: vek(a1, b1),
+        min: pos(a0, b0),
+        max: pos(a1, b1),
     }
 }
 
+fn ordered<T>(v1: T, v2: T) -> (T, T) where T : Ord {
+    if v1 < v2 {
+        return (v1, v2)
+    }
+    (v2, v1)
+}
 
 impl Rec {
-    fn x0(self) -> i32 { self.min.x }
-    fn y0(self) -> i32 { self.min.y }
-    fn x1(self) -> i32 { self.max.x }
-    fn y1(self) -> i32 { self.max.y }
-    fn w(self) -> i32 { self.max.x - self.min.x }
-    fn h(self) -> i32 { self.max.y - self.min.y }
+    pub fn x0(self) -> i32 { self.min.x }
+    pub fn y0(self) -> i32 { self.min.y }
+    pub fn x1(self) -> i32 { self.max.x }
+    pub fn y1(self) -> i32 { self.max.y }
+    pub fn w(self) -> i32 { self.max.x - self.min.x }
+    pub fn h(self) -> i32 { self.max.y - self.min.y }
 
-    fn area(self) -> i32 { self.w() * self.h() }
-    fn size(self) -> Vek { vek(self.w(), self.h()) }
+    pub fn area(self) -> i32 { self.w() * self.h() }
+    pub fn size(self) -> Pos { pos(self.w(), self.h()) }
 
-    fn row(self, y: i32) -> Rec {
+    pub fn row(self, y: i32) -> Rec {
         check!(self.min.y <= y, "row was out of bounds (left)");
         check!(y <= self.max.y, "row was out of bounds (right)");
         rec(self.min.x, y, self.max.x, y + 1)
     }
 
-    fn column(self, x: i32) -> Rec {
+    pub fn column(self, x: i32) -> Rec {
         check!(self.min.x <= x, "column was out of bounds (top)");
         check!(x <= self.max.x, "column was out of bounds (bottom)");
         rec(x, self.min.y, x + 1, self.max.y)
     }
 
     // TODO: should x be forbidden from matching the bounds (i.e no empty output)
-    fn hsplit(self, x: i32) -> (Rec, Rec) {
+    pub fn hsplit(self, x: i32) -> (Rec, Rec) {
         check!(self.min.x <= x);
         check!(x < self.max.x);
 
@@ -635,7 +649,7 @@ impl Rec {
         (left, right)
     }
 
-    fn vsplit(self, y: i32) -> (Rec, Rec) {
+    pub fn vsplit(self, y: i32) -> (Rec, Rec) {
         check!(self.min.y <= y);
         check!(y < self.max.y);
 
@@ -645,63 +659,8 @@ impl Rec {
         (up, down)
     }
 
-    // TODO: add a hsplit function
-}
-
-
-/* Vek/Vek ops */
-
-impl Vek {
-    fn rec(self) -> Rec {
-        Rec {
-            min: vek(0,0),
-            max: self,
-        }
-    }
-
-    fn extrude(self, diag: Vek) -> Rec {
-        Rec {
-            min: self,
-            max: self + diag,
-        }
-    }
-}
-
-impl Display for Vek {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "({}, {})", self.x, self.y)
-    }
-}
-
-impl std::ops::Add<Vek> for Vek {
-    type Output = Vek;
-
-    fn add(self, v: Vek) -> Vek {
-        vek(self.x + v.x, self.y + v.y)
-    }
-}
-
-impl std::ops::Sub<Vek> for Vek {
-    type Output = Vek;
-
-    fn sub(self, v: Vek) -> Vek {
-        vek(self.x - v.x, self.y - v.y)
-    }
-}
-
-impl std::ops::Neg for Vek {
-    type Output = Vek;
-
-    fn neg(self) -> Vek {
-        vek(-self.x, -self.y)
-    }
-}
-
-/* Vek/Rec ops */
-
-impl Rec {
     // TODO: consider excluding max
-    fn contains(self, v : Vek) -> bool {
+    pub fn contains(self, v : Pos) -> bool {
         self.min.x <= v.x &&
         self.min.y <= v.y &&
                       v.x <= self.max.x &&
@@ -709,10 +668,60 @@ impl Rec {
     }
 }
 
-impl std::ops::Add<Vek> for Rec {
+/* Pos/Pos ops */
+
+impl Pos {
+    pub fn rec(self) -> Rec {
+        Rec {
+            min: pos(0,0),
+            max: self,
+        }
+    }
+
+    pub fn extrude(self, diag: Pos) -> Rec {
+        Rec {
+            min: self,
+            max: self + diag,
+        }
+    }
+}
+
+impl fmt::Display for Pos {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "({}, {})", self.x, self.y)
+    }
+}
+
+impl std::ops::Add<Pos> for Pos {
+    type Output = Pos;
+
+    fn add(self, v: Pos) -> Pos {
+        pos(self.x + v.x, self.y + v.y)
+    }
+}
+
+impl std::ops::Sub<Pos> for Pos {
+    type Output = Pos;
+
+    fn sub(self, v: Pos) -> Pos {
+        pos(self.x - v.x, self.y - v.y)
+    }
+}
+
+impl std::ops::Neg for Pos {
+    type Output = Pos;
+
+    fn neg(self) -> Pos {
+        pos(-self.x, -self.y)
+    }
+}
+
+/* Pos/Rec ops */
+
+impl std::ops::Add<Pos> for Rec {
     type Output = Rec;
 
-    fn add(self, v: Vek) -> Rec {
+    fn add(self, v: Pos) -> Rec {
         Rec {
             min: self.min + v,
             max: self.max + v,
@@ -720,7 +729,7 @@ impl std::ops::Add<Vek> for Rec {
     }
 }
 
-impl std::ops::Add<Rec> for Vek {
+impl std::ops::Add<Rec> for Pos {
     type Output = Rec;
 
     fn add(self, r: Rec) -> Rec {
@@ -728,10 +737,10 @@ impl std::ops::Add<Rec> for Vek {
     }
 }
 
-impl std::ops::Sub<Vek> for Rec {
+impl std::ops::Sub<Pos> for Rec {
     type Output = Rec;
 
-    fn sub(self, v: Vek) -> Rec {
+    fn sub(self, v: Pos) -> Rec {
         Rec {
             min: self.min - v,
             max: self.max - v,
@@ -739,6 +748,8 @@ impl std::ops::Sub<Vek> for Rec {
     }
 }
 
+
+}
 
 /* Colors */
 
@@ -862,20 +873,6 @@ fn i32(x: usize) -> i32 {
     x as i32
 }
 
-
-fn ordered<T>(v1: T, v2: T) -> (T, T) where T : Ord {
-    if v1 < v2 {
-        return (v1, v2)
-    }
-    (v2, v1)
-}
-
-fn reorder<T>(v1: &mut T, v2: &mut T) where T : Ord {
-    if v1 > v2 {
-        std::mem::swap(v1, v2)
-    }
-}
-
 // CLEANUP: replace with memset if this is ever a thing in Rust
 fn fill<T>(s: &mut [T], t: T) where T : Copy {
     for i in s.iter_mut() {
@@ -926,7 +923,7 @@ const frame_default_fg : Color = Color::Black;
 const frame_default_bg : Color = Color::White;
 
 impl Framebuffer {
-    fn mk_framebuffer(window: Vek) -> Framebuffer {
+    fn mk_framebuffer(window: Pos) -> Framebuffer {
         let len = window.x * window.y;
         let vlen = len as usize;
 
@@ -936,7 +933,7 @@ impl Framebuffer {
             text:       vec![frame_default_text; vlen],
             fg:         vec![frame_default_fg; vlen],
             bg:         vec![frame_default_bg; vlen],
-            cursor:     vek(0,0),
+            cursor:     pos(0,0),
             buffer:     vec![0; 64 * 1024],
         }
     }
@@ -948,7 +945,7 @@ impl Framebuffer {
         fill(&mut self.bg,   frame_default_bg);
     }
 
-    fn put_line(&mut self, pos: Vek, src: &[u8]) {
+    fn put_line(&mut self, pos: Pos, src: &[u8]) {
         check!(self.window.rec().contains(pos));
 
         let maxlen = (self.window.x - pos.x) as usize;
@@ -985,14 +982,14 @@ impl Framebuffer {
         }
     }
 
-    fn set_cursor(&mut self, new_cursor: Vek) {
+    fn set_cursor(&mut self, new_cursor: Pos) {
         let mut x = new_cursor.x;
         let mut y = new_cursor.y;
         x = max(x, 0);
         x = min(x, self.window.x - 1);
         y = max(y, 0);
         y = min(y, self.window.y - 1);
-        self.cursor = vek(x,y);
+        self.cursor = pos(x,y);
     }
 
     // TODO: propagate error
@@ -1138,13 +1135,13 @@ impl Debugconsole {
             return
         }
 
-        let size = vek(self.width, min(self.next_entry, self.height));
-        let consoleoffset = - vek(0,1); // don't overwrite the footer.
+        let size = pos(self.width, min(self.next_entry, self.height));
+        let consoleoffset = - pos(0,1); // don't overwrite the footer.
         let consolearea = Rec { min: framebuffer.window - size, max: framebuffer.window } + consoleoffset;
 
         let start = max(0, self.next_entry - self.height);
         for i in start..self.next_entry {
-            let dst_offset = consolearea.max - vek(self.width, self.next_entry - i);
+            let dst_offset = consolearea.max - pos(self.width, self.next_entry - i);
             framebuffer.put_line(dst_offset, self.get_line(i));
         }
         framebuffer.put_color(consolearea, CONF.color_console);
@@ -1185,7 +1182,7 @@ impl<'a> Screen<'a> {
         {
             let y_stop = min(self.textarea.h(), buffer.nlines() - file_base_offset.y);
             for i in 0..y_stop {
-                let lineoffset = vek(0, i);
+                let lineoffset = pos(0, i);
                 let file_offset = file_base_offset + lineoffset;
                 let frame_offset = frame_base_offset + lineoffset;
 
@@ -1205,7 +1202,7 @@ impl<'a> Screen<'a> {
             };
             for i in 0..self.textarea.h() {
                 itoa10(&mut buf, lineno_base + i, ' ' as u8);
-                self.framebuffer.put_line(self.linenoarea.min + vek(0,i), &buf);
+                self.framebuffer.put_line(self.linenoarea.min + pos(0,i), &buf);
             }
             self.framebuffer.put_color(self.linenoarea, CONF.color_lineno);
         }
@@ -1353,7 +1350,7 @@ impl Buffer {
         let mut f = File::create(path)?;
 
         for i in 0..self.nlines() {
-            f.write_all(self.line_get_slice(vek(0,i)))?;
+            f.write_all(self.line_get_slice(pos(0,i)))?;
             f.write_all(b"\n")?; // TODO: use platform's newline
         }
 
@@ -1396,7 +1393,7 @@ impl Buffer {
         self.textbuffer.lines[line_idx] = line;
     }
 
-    fn line_get_slice<'a>(&'a self, offset: Vek) -> &'a[u8] {
+    fn line_get_slice<'a>(&'a self, offset: Pos) -> &'a[u8] {
         let x = offset.x as usize;
         let y = offset.y as usize;
         let line = self.line_get(y).to_slice(&self.textbuffer.text);
@@ -1436,7 +1433,7 @@ impl Buffer {
     }
 
     // CHECK: from/to should be inclusive
-    fn delete(&mut self, from: Vek, to: Vek) {
+    fn delete(&mut self, from: Pos, to: Pos) {
         let mut y_start = usize(from.y);
         let mut y_stop = usize(to.y);
 
@@ -1557,12 +1554,12 @@ impl Commandstate {
                 e.buffer.line_new(lineno);
             }
 
-            LineBreak(Vek { x, y }) => {
+            LineBreak(Pos { x, y }) => {
                 let lineno = usize(y);
                 let colno = usize(x);
                 e.buffer.snapshot();
                 e.buffer.line_break(lineno, colno);
-                e.view.cursor = vek(0, y + 1);
+                e.view.cursor = pos(0, y + 1);
             }
 
             Undo => {
@@ -1597,29 +1594,29 @@ impl Insertstate {
     fn do_insert(&mut self, op: InsertOp, e: &mut Editor) -> Re<Mode> {
         use InsertOp::*;
         match op {
-            LineBreak(Vek { x, y }) => {
+            LineBreak(Pos { x, y }) => {
                 e.buffer.line_break(usize(y), usize(x));
-                e.view.cursor = vek(0, y + 1);
+                e.view.cursor = pos(0, y + 1);
             }
 
-            CharInsert(Vek { x, y }, c) => {
+            CharInsert(Pos { x, y }, c) => {
                 if is_printable(c) {
                     e.buffer.insert(self.mode, usize(y), usize(x), c);
-                    e.view.cursor = vek(x + 1, y);
+                    e.view.cursor = pos(x + 1, y);
                     // TODO: think about auto linebreak
                 }
             }
 
-            Delete(pos) => {
+            Delete(p) => {
                 // BUG: this should use char next instead, for handling end of line
-                e.buffer.delete(pos, pos + vek(1,0))
+                e.buffer.delete(p, p + pos(1,0))
             }
 
-            Backspace(pos) => {
+            Backspace(p) => {
                 // BUG: this should use char previous instead, for handling start of line
-                if pos.x > 0 {
-                    let newpos = pos - vek(1,0);
-                    e.buffer.delete(newpos, pos);
+                if p.x > 0 {
+                    let newpos = p - pos(1,0);
+                    e.buffer.delete(newpos, p);
                     e.view.cursor = newpos;
                 }
             }
@@ -1701,8 +1698,8 @@ impl Editor {
 
         // footer
         {
-            self.framebuffer.put_line(self.footer.min + vek(1,0), mode.name().as_bytes());
-            self.framebuffer.put_line(self.footer.min + vek(10, 0), b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
+            self.framebuffer.put_line(self.footer.min + pos(1,0), mode.name().as_bytes());
+            self.framebuffer.put_line(self.footer.min + pos(10, 0), b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
             self.framebuffer.put_color(self.footer, mode.footer_color());
         }
 
@@ -1722,11 +1719,11 @@ impl Editor {
     fn mv_cursor(&mut self, m : Move) {
         use Move::*;
         let delta = match m {
-            Left  => vek(-1,0),
-            Right => vek(1,0),
-            Up    => vek(0,-1),
-            Down  => vek(0,1),
-            _     => vek(0,0),
+            Left  => pos(-1,0),
+            Right => pos(1,0),
+            Up    => pos(0,-1),
+            Down  => pos(0,1),
+            _     => pos(0,0),
         };
 
         // TODO: update the 'desired cursor position' instead of the real cursor position
@@ -1807,10 +1804,10 @@ impl Drop for Term {
 }
 
 impl Term {
-    fn size() -> Vek {
+    fn size() -> Pos {
         unsafe {
             let ws = terminal_get_size();
-            vek(ws.ws_col as i32, ws.ws_row as i32)
+            pos(ws.ws_col as i32, ws.ws_row as i32)
         }
     }
 
@@ -1893,8 +1890,8 @@ const term_newline                    : &[u8] = b"\r\n";
 enum Input {
     Noinput,
     Key(char),
-    Click(Vek),
-    ClickRelease(Vek),
+    Click(Pos),
+    ClickRelease(Pos),
     UnknownEscSeq,
     EscZ,       // shift + tab -> "\x1b[Z"
     Resize,
@@ -1911,8 +1908,8 @@ impl fmt::Display for Input {
             Resize                          => f.write_str(&"Resize"),
             Error                           => f.write_str(&"Error"),
             Key(c)                          => Input::fmt_key_name(*c, f),
-            Click(Vek { x, y })             => write!(f, "click ({},{})'", y, x),
-            ClickRelease(Vek { x, y })      => write!(f, "unclick ({},{})'", y, x),
+            Click(Pos { x, y })             => write!(f, "click ({},{})'", y, x),
+            ClickRelease(Pos { x, y })      => write!(f, "unclick ({},{})'", y, x),
         }
     }
 }
@@ -2086,11 +2083,11 @@ fn pull_input(chan: &Receiver<char>) -> Re<Input> {
         y += 255;
     }
 
-    let v = vek(x,y);
+    let p = pos(x,y);
 
     let r = match c2 & 3 /* ignore modifier keys */ {
-        0 ... 2 =>  Click(v),
-        3       =>  ClickRelease(v),
+        0 ... 2 =>  Click(p),
+        3       =>  ClickRelease(p),
         _       =>  UnknownEscSeq,
     };
 
