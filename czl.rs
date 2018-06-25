@@ -68,7 +68,7 @@ macro_rules! er {
  *  - think more about where to track the screen area:
  *      right now it is repeated both in Screen and in View
  *      ideally Screen would not be tracking it
- *  - utf8 support: Line and Filebuffer, Input, ... don't wait too much
+ *  - utf8 support: Range and Filebuffer, Input, ... don't wait too much
  */
 
 
@@ -394,7 +394,7 @@ enum Draw {
 
 struct Text {
     text:   Vec<u8>,    // original content of the file when loaded
-    lines:  Vec<Line>,  // subslices into the buffer or appendbuffer
+    lines:  Vec<Range>,  // subslices into the buffer or appendbuffer
 }
 
 #[derive(Clone)] // Do I need clone ??
@@ -413,14 +413,37 @@ struct Buffer {
 
 // A pair of offsets into a buffer for delimiting lines.
 #[derive(Debug, Clone, Copy)]
-struct Line {
+struct Range {
     start:  usize,      // inclusive
     stop:   usize,      // exclusive
 }
 
-fn line(start: usize, stop: usize) -> Line {
+fn range(start: usize, stop: usize) -> Range {
     check!(start <= stop);
-    Line { start , stop }
+    Range { start , stop }
+}
+
+struct Line<'a> {
+    range:   Range,
+    text: &'a [u8],
+}
+
+impl <'a> Line<'a> {
+    fn char_at(self, colno: usize) -> char {
+        self.text[self.range.start + colno] as char
+    }
+
+    fn to_slice(&self) -> &'a[u8] {
+        &self.text[self.range.start..self.range.stop]
+    }
+
+    fn len(&self) -> usize {
+        self.range.stop - self.range.start
+    }
+
+    fn cut(&self, n: usize) -> (Range, Range) {
+        self.range.cut(n)
+    }
 }
 
 // TODO: split into movement ops, buffer ops, + misc
@@ -1220,23 +1243,15 @@ impl<'a> Screen<'a> {
 }
 
 
-impl Line {
-    fn char_at(self, text: &[u8], colno: usize) -> char {
-        text[self.start + colno] as char
-    }
-
-    fn to_slice<'a>(self, text: &'a[u8]) -> &'a[u8] {
-        &text[self.start..self.stop]
-    }
-
+impl Range {
     fn len(self) -> usize {
         self.stop - self.start
     }
 
-    fn cut(self, n: usize) -> (Line, Line) {
+    fn cut(self, n: usize) -> (Range, Range) {
         let pivot = self.start + n;
         check!(pivot <= self.stop);
-        (line(self.start, pivot), line(pivot, self.stop))
+        (range(self.start, pivot), range(pivot, self.stop))
     }
 }
 
@@ -1269,7 +1284,7 @@ impl Text {
     }
 
     fn emptyline(&mut self) -> usize {
-        self.lines.push(line(self.text.len(), self.text.len()));
+        self.lines.push(range(self.text.len(), self.text.len()));
         self.lines.len() - 1
     }
 
@@ -1277,7 +1292,7 @@ impl Text {
         let src = self.lines[line_idx];
         let dststart = self.text.len();
         let dststop = dststart + src.len();
-        let dst = line(dststart, dststop);
+        let dst = range(dststart, dststop);
 
         self.text.reserve(src.len());
         for i in src.start..src.stop {
@@ -1317,7 +1332,7 @@ impl Buffer {
                     Some(o) => a + o,
                     None    => l,
                 };
-                lines.push(line(a, b));
+                lines.push(range(a, b));
                 a = b + 1; // skip the '\n'
 
 //                if lines.len() == 40 {
@@ -1335,7 +1350,7 @@ impl Buffer {
         //       mode transation does this properly.
         {
             line_indexes.push(lines.len());
-            lines.push(line(text.len(), text.len()));
+            lines.push(range(text.len(), text.len()));
         }
 
         Buffer {
@@ -1364,7 +1379,7 @@ impl Buffer {
     }
 
     fn char_at(&self, lineno: usize, colno: usize) -> char {
-        self.line_get(lineno).char_at(&self.textbuffer.text, colno)
+        self.line_get(lineno).char_at(colno)
     }
 
     fn nlines(&self) -> i32 {
@@ -1385,18 +1400,21 @@ impl Buffer {
     }
 
     fn line_get(&self, lineno: usize) -> Line {
-        self.textbuffer.lines[self.line_index(lineno)]
+        Line {
+            range: self.textbuffer.lines[self.line_index(lineno)],
+            text: &self.textbuffer.text,
+        }
     }
 
-    fn line_set(&mut self, lineno: usize, line: Line) {
+    fn line_set(&mut self, lineno: usize, range: Range) {
         let line_idx = self.line_index(lineno);
-        self.textbuffer.lines[line_idx] = line;
+        self.textbuffer.lines[line_idx] = range;
     }
 
     fn line_get_slice<'a>(&'a self, offset: Pos) -> &'a[u8] {
         let x = offset.x as usize;
         let y = offset.y as usize;
-        let line = self.line_get(y).to_slice(&self.textbuffer.text);
+        let line = self.line_get(y).to_slice();
         shift(line, x)
     }
 
@@ -1441,21 +1459,21 @@ impl Buffer {
 
         // Case 1: delete a range in a single line
         if y_start == y_stop {
-            let line = self.line_get(y_start);
-
-            let newlen = line.len() - usize(to.x - from.x);
+            let oldlen = self.line_get(y_start).len();
+            let newlen = oldlen - usize(to.x - from.x);
             let newline_idx = self.textbuffer.emptyline();
-            self.current_snapshot.line_indexes[y_start] = newline_idx;
             self.textbuffer.text.reserve(newlen);
 
             for i in 0..usize(from.x) {
-                let c =  line.char_at(&self.textbuffer.text, i);
+                let c =  self.line_get(y_start).char_at(i);
                 self.textbuffer.append(c);
             }
-            for i in usize(to.x)..line.len() {
-                let c =  line.char_at(&self.textbuffer.text, i);
+            for i in usize(to.x)..oldlen {
+                let c =  self.line_get(y_start).char_at(i);
                 self.textbuffer.append(c);
             }
+
+            self.current_snapshot.line_indexes[y_start] = newline_idx;
 
             return
         }
@@ -1470,9 +1488,8 @@ impl Buffer {
             y_start += 1;
         }
 
-        let last_cut_line = self.line_get(y_stop);
-        if usize(to.x) != last_cut_line.len() {
-            let (_, keep) = last_cut_line.cut(usize(to.x));
+        if usize(to.x) != self.line_get(y_stop).len() {
+            let (_, keep) = self.line_get(y_stop).cut(usize(to.x));
             self.line_set(y_stop, keep);
             y_stop -= 1;
         }
