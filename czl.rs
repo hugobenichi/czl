@@ -17,6 +17,7 @@ use std::sync::mpsc;
 
 use conf::*;
 use core::*;
+use draw::*;
 use term::*;
 use text::*;
 use util::*;
@@ -327,25 +328,6 @@ impl Mode {
 }
 
 
-// Transient object for putting text into a subrectangle of a framebuffer.
-// All positions are w.r.t the Framebuffer (0,0) origin.
-// Since it needs a mut ref to the framebuffer, Screen objs cannot be stored.
-struct Screen<'a> {
-    framebuffer:    &'a mut Framebuffer,
-    window:         Rec,
-    linenoarea:     Rec,
-    textarea:       Rec,
-    header:         Rec,
-    view:       &'a View,
-    // TODO: consider adding Buffer directly here too
-}
-
-enum Draw {
-    Nothing,
-    All,
-    Header,
-    Text,
-}
 
 // TODO: split into movement ops, buffer ops, + misc
 enum CommandOp {
@@ -953,10 +935,33 @@ impl Debugconsole {
 
 
 /* DRAWING AND FRAME/SCREEN MANAGEMENT */
+// TODO: nothing should directly use Framebuffer, instead always use a Screen !
+mod draw {
+
+
+use std::cmp::max;
+use std::cmp::min;
+use std::io;
+use std::io::Write;
+use std::mem::replace;
+
+use util::*;
+use conf::CONF;
+use core::*;
+use term::*;
+use text::Buffer;
+
+
+pub enum Draw {
+    Nothing,
+    All,
+    Header,
+    Text,
+}
 
 
 // The struct that manages compositing.
-struct Framebuffer {
+pub struct Framebuffer {
     window:     Pos,
     len:        i32,
 
@@ -975,7 +980,7 @@ const frame_default_fg : Color = Color::Black;
 const frame_default_bg : Color = Color::White;
 
 impl Framebuffer {
-    fn mk_framebuffer(window: Pos) -> Framebuffer {
+    pub fn mk_framebuffer(window: Pos) -> Framebuffer {
         let len = window.x * window.y;
         let vlen = len as usize;
 
@@ -991,13 +996,13 @@ impl Framebuffer {
     }
 
     // TODO: add clear in sub rec
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         fill(&mut self.text, frame_default_text);
         fill(&mut self.fg,   frame_default_fg);
         fill(&mut self.bg,   frame_default_bg);
     }
 
-    fn put_line(&mut self, pos: Pos, src: &[u8]) {
+    pub fn put_line(&mut self, pos: Pos, src: &[u8]) {
         check!(self.window.rec().contains(pos));
 
         let maxlen = (self.window.x - pos.x) as usize;
@@ -1010,7 +1015,7 @@ impl Framebuffer {
     }
 
     // area.min is inclusive, area.max is exclusive
-    fn put_color(&mut self, area: Rec, colors: Colorcell) {
+    pub fn put_color(&mut self, area: Rec, colors: Colorcell) {
         if CONF.debug_bounds {
             check!(0 <= area.x0());
             check!(0 <= area.y0());
@@ -1047,7 +1052,7 @@ impl Framebuffer {
     // TODO: propagate error
     // TODO: add color
     // PERF: skip unchanged sections
-    fn render(&mut self) -> Re<()> {
+    pub fn render(&mut self) -> Re<()> {
         if !CONF.draw_screen {
             return Ok(())
         }
@@ -1148,75 +1153,98 @@ impl Framebuffer {
 
 }
 
-impl<'a> Screen<'a> {
-    fn mk_screen<'b>(window: Rec, framebuffer: &'b mut Framebuffer, view: &'b View) -> Screen<'b> {
+
+// A subrectangle of a framebuffer for drawing text.
+// All positions are w.r.t the Framebuffer (0,0) origin.
+pub struct Screen {
+    window:         Rec,
+    linenoarea:     Rec,
+    textarea:       Rec,
+    header:         Rec,
+}
+
+impl Screen {
+    pub fn mk_screen(window: Rec) -> Screen {
         let lineno_len = 5;
         let (header, filearea) = window.vsplit(1);
         let (linenoarea, textarea) = filearea.hsplit(lineno_len);
 
         Screen {
-            framebuffer,
             window,
             linenoarea,
             textarea,
             header,
-            view,
         }
     }
 
-    fn draw(&mut self, draw: Draw, buffer: &Buffer) {
+    pub fn draw(&self, framebuffer: &mut Framebuffer, drawinfo: &Drawinfo) {
         // TODO: use draw and only redraw what's needed
         // TODO: automatize the screen coordinate offsetting for framebuffer commands
-        let file_base_offset = self.view.filearea.min;
+        let file_base_offset = drawinfo.buffer_offset;
         let frame_base_offset = self.textarea.min;
 
         // header
         {
-                let header_string = format!("{}  {:?}", self.view.filepath, self.view.movement_mode);
-                self.framebuffer.put_line(self.header.min, header_string.as_bytes());
-                self.framebuffer.put_color(self.header, CONF.color_header_active);
+            framebuffer.put_line(self.header.min, drawinfo.header.as_bytes());
+            framebuffer.put_color(self.header, CONF.color_header_active);
         }
 
         // buffer content
         {
-            let y_stop = min(self.textarea.h(), buffer.nlines() - file_base_offset.y);
+            let y_stop = min(self.textarea.h(), drawinfo.buffer.nlines() - file_base_offset.y);
             for i in 0..y_stop {
                 let lineoffset = pos(0, i);
                 let file_offset = file_base_offset + lineoffset;
                 let frame_offset = frame_base_offset + lineoffset;
 
-                let mut line = buffer.line_get_slice(file_offset);
+                let mut line = drawinfo.buffer.line_get_slice(file_offset);
                 line = clamp(line, self.textarea.w() as usize);
-                self.framebuffer.put_line(frame_offset, line);
+                framebuffer.put_line(frame_offset, line);
             }
         }
 
         // lineno
         {
             let mut buf = [0 as u8; 4];
-            let lineno_base = if self.view.relative_lineno {
-                file_base_offset.y - self.view.cursor.y
+            let lineno_base = if drawinfo.relative_lineno {
+                file_base_offset.y - drawinfo.cursor.y
             } else {
                 file_base_offset.y + 1
             };
             for i in 0..self.textarea.h() {
                 itoa10(&mut buf, lineno_base + i, ' ' as u8);
-                self.framebuffer.put_line(self.linenoarea.min + pos(0,i), &buf);
+                framebuffer.put_line(self.linenoarea.min + pos(0,i), &buf);
             }
-            self.framebuffer.put_color(self.linenoarea, CONF.color_lineno);
+            framebuffer.put_color(self.linenoarea, CONF.color_lineno);
         }
 
+        // cursor
         {
-            let cursor_screen_position = self.view.cursor + self.textarea.min - file_base_offset;
-            if self.view.is_active {
-                self.framebuffer.set_cursor(cursor_screen_position);
+            let cursor_screen_position = drawinfo.cursor + self.textarea.min - file_base_offset;
+            if drawinfo.is_active {
+                framebuffer.set_cursor(cursor_screen_position);
             }
 
-            self.framebuffer.put_color(self.textarea.row(cursor_screen_position.y), CONF.color_cursor_lines);
-            self.framebuffer.put_color(self.textarea.column(cursor_screen_position.x), CONF.color_cursor_lines);
+            framebuffer.put_color(self.textarea.row(cursor_screen_position.y), CONF.color_cursor_lines);
+            framebuffer.put_color(self.textarea.column(cursor_screen_position.x), CONF.color_cursor_lines);
         }
     }
 }
+
+
+// Helper data object for Screen::draw
+pub struct Drawinfo<'a> {
+    pub header:             &'a str,
+    // TODO: replace 'buffer' and 'buffer_offset' with iterator of &[u8]
+    pub buffer:             &'a Buffer,
+    pub buffer_offset:      Pos,
+    pub cursor:             Pos,
+    pub draw:               Draw,
+    pub relative_lineno:    bool,
+    pub is_active:          bool,
+}
+
+} // mod draw
 
 
 
@@ -1783,8 +1811,18 @@ impl Editor {
         {
             let draw_time = Scopeclock::measure("draw");
 
-            let mut screen = Screen::mk_screen(self.mainscreen, &mut self.framebuffer, &self.view);
-            screen.draw(Draw::All, &self.buffer);
+            let header = format!("{}  {:?}", self.view.filepath, self.view.movement_mode);
+            let drawinfo = Drawinfo {
+                header:             &header,
+                buffer:             &self.buffer,
+                buffer_offset:      self.view.filearea.min,
+                cursor:             self.view.cursor,
+                draw:               Draw::All,
+                relative_lineno:    self.view.relative_lineno,
+                is_active:          self.view.is_active,
+            };
+            let screen = Screen::mk_screen(self.mainscreen); //TODO: persist in Editor
+            screen.draw(&mut self.framebuffer, &drawinfo);
         }
 
         // footer
