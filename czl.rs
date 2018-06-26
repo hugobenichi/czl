@@ -18,6 +18,7 @@ use std::sync::mpsc;
 use conf::*;
 use core::*;
 use term::*;
+use text::*;
 use util::*;
 
 
@@ -61,6 +62,13 @@ macro_rules! check {
  *      ideally Screen would not be tracking it
  *  - utf8 support: Range and Filebuffer, Input, ... don't wait too much
  */
+
+
+fn main() {
+    let term = Term::set_raw().unwrap();
+
+    Editor::run().unwrap();
+}
 
 
 mod conf {
@@ -156,10 +164,6 @@ struct Editor {
     buffer: Buffer,
     view:   View,
 }
-
-
-
-
 
 #[derive(Debug)]
 enum Move {
@@ -343,60 +347,6 @@ enum Draw {
     Text,
 }
 
-struct Text {
-    text:   Vec<u8>,    // original content of the file when loaded
-    lines:  Vec<Range>,  // subslices into the buffer or appendbuffer
-}
-
-#[derive(Clone)] // Do I need clone ??
-struct Textsnapshot {
-    line_indexes: Vec<usize> // the actual lines in the current files, as indexes into 'lines'
-}
-
-// Manage content of a file
-// Q: can I have a vec in a struct and another subslice pointing into that vec ?
-//    I would need to say that they both have the same lifetime as the struct.
-struct Buffer {
-    textbuffer:             Text,
-    previous_snapshots:     Vec<Textsnapshot>,
-    current_snapshot:       Textsnapshot,
-}
-
-// A pair of offsets into a buffer for delimiting lines.
-#[derive(Debug, Clone, Copy)]
-struct Range {
-    start:  usize,      // inclusive
-    stop:   usize,      // exclusive
-}
-
-fn range(start: usize, stop: usize) -> Range {
-    check!(start <= stop);
-    Range { start , stop }
-}
-
-struct Line<'a> {
-    range:   Range,
-    text: &'a [u8],
-}
-
-impl <'a> Line<'a> {
-    fn char_at(self, colno: usize) -> char {
-        self.text[self.range.start + colno] as char
-    }
-
-    fn to_slice(&self) -> &'a[u8] {
-        &self.text[self.range.start..self.range.stop]
-    }
-
-    fn len(&self) -> usize {
-        self.range.stop - self.range.start
-    }
-
-    fn cut(&self, n: usize) -> (Range, Range) {
-        self.range.cut(n)
-    }
-}
-
 // TODO: split into movement ops, buffer ops, + misc
 enum CommandOp {
     Movement(Move),
@@ -425,12 +375,6 @@ enum InsertOp {
     Backspace(Pos),
     SwitchCommand,
     Noop,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum InsertMode {
-    Insert,
-    Replace,
 }
 
 // Point to a place inside a Buffer
@@ -1008,7 +952,7 @@ impl Debugconsole {
 } // mod util
 
 
-/* CORE TYPE IMPLEMENTATION */
+/* DRAWING AND FRAME/SCREEN MANAGEMENT */
 
 
 // The struct that manages compositing.
@@ -1275,6 +1219,32 @@ impl<'a> Screen<'a> {
 }
 
 
+
+/* BUFFER AND TEXT MANAGEMENT */
+mod text {
+
+
+use std::fs;
+use std::io::Read;
+use std::io::Write;
+use std::mem::replace;
+
+use core::*;
+use util::*;
+
+
+fn range(start: usize, stop: usize) -> Range {
+    check!(start <= stop);
+    Range { start , stop }
+}
+
+// A pair of offsets into a buffer for delimiting lines.
+#[derive(Debug, Clone, Copy)]
+struct Range {
+    start:  usize,      // inclusive
+    stop:   usize,      // exclusive
+}
+
 impl Range {
     fn len(self) -> usize {
         self.stop - self.start
@@ -1285,6 +1255,36 @@ impl Range {
         check!(pivot <= self.stop);
         (range(self.start, pivot), range(pivot, self.stop))
     }
+}
+
+
+struct Line<'a> {
+    range:   Range,
+    text: &'a [u8],
+}
+
+impl <'a> Line<'a> {
+    fn char_at(self, colno: usize) -> char {
+        self.text[self.range.start + colno] as char
+    }
+
+    fn to_slice(&self) -> &'a[u8] {
+        &self.text[self.range.start..self.range.stop]
+    }
+
+    fn len(&self) -> usize {
+        self.range.stop - self.range.start
+    }
+
+    fn cut(&self, n: usize) -> (Range, Range) {
+        self.range.cut(n)
+    }
+}
+
+
+struct Text {
+    text:   Vec<u8>,    // original content of the file when loaded
+    lines:  Vec<Range>,  // subslices into the buffer or appendbuffer
 }
 
 impl Text {
@@ -1338,9 +1338,22 @@ impl Text {
     }
 }
 
+
+#[derive(Clone)] // Do I need clone ??
+struct Textsnapshot {
+    line_indexes: Vec<usize> // the actual lines in the current files, as indexes into 'lines'
+}
+
+// Manage content of a file
+pub struct Buffer {
+    textbuffer:             Text,
+    previous_snapshots:     Vec<Textsnapshot>,
+    current_snapshot:       Textsnapshot,
+}
+
 // TODO: this should implement array bracket notation ?
 impl Buffer {
-    fn from_file(path: &str) -> Re<Buffer> {
+    pub fn from_file(path: &str) -> Re<Buffer> {
         let text = file_load(path)?;
 
         Ok(Buffer::from_text(text))
@@ -1393,7 +1406,7 @@ impl Buffer {
     }
 
     // TODO: propagate errors
-    fn to_file(&self, path: &str) -> Re<()> {
+    pub fn to_file(&self, path: &str) -> Re<()> {
         let mut f = fs::File::create(path)?;
 
         for i in 0..self.nlines() {
@@ -1404,30 +1417,30 @@ impl Buffer {
         Ok(())
     }
 
-    fn snapshot(&mut self) {
+    pub fn snapshot(&mut self) {
         let next_snapshot = self.current_snapshot.clone();
         let prev_snapshot = replace(&mut self.current_snapshot, next_snapshot);
         self.previous_snapshots.push(prev_snapshot);
     }
 
-    fn char_at(&self, lineno: usize, colno: usize) -> char {
+    pub fn char_at(&self, lineno: usize, colno: usize) -> char {
         self.line_get(lineno).char_at(colno)
     }
 
-    fn nlines(&self) -> i32 {
+    pub fn nlines(&self) -> i32 {
         i32(self.current_snapshot.line_indexes.len())
     }
 
-    fn last_line(&self) -> usize {
+    pub fn last_line(&self) -> usize {
         self.current_snapshot.line_indexes.len() - 1
     }
 
-    fn line_len(&self, y: usize) -> usize {
+    pub fn line_len(&self, y: usize) -> usize {
         let idx = self.current_snapshot.line_indexes[y as usize];
         self.textbuffer.lines[idx].len()
     }
 
-    fn line_index(&self, lineno: usize) -> usize {
+    pub fn line_index(&self, lineno: usize) -> usize {
         self.current_snapshot.line_indexes[lineno]
     }
 
@@ -1443,21 +1456,21 @@ impl Buffer {
         self.textbuffer.lines[line_idx] = range;
     }
 
-    fn line_get_slice<'a>(&'a self, offset: Pos) -> &'a[u8] {
+    pub fn line_get_slice<'a>(&'a self, offset: Pos) -> &'a[u8] {
         let x = offset.x as usize;
         let y = offset.y as usize;
         let line = self.line_get(y).to_slice();
         shift(line, x)
     }
 
-    fn line_del(&mut self, y: usize) {
+    pub fn line_del(&mut self, y: usize) {
         check!(y < self.current_snapshot.line_indexes.len());
         self.current_snapshot.line_indexes.remove(y);
 
         // TODO: update all other views of that file whose cursors is below lineno
     }
 
-    fn line_new(&mut self, lineno: usize) {
+    pub fn line_new(&mut self, lineno: usize) {
         let lastline = self.current_snapshot.line_indexes.len() - 1;
         self.current_snapshot.line_indexes.reserve(1);
 // CLEANUP: use Vec.insert
@@ -1470,7 +1483,7 @@ impl Buffer {
         // TODO: update all other views of that file whose cursors is below lineno
     }
 
-    fn line_break(&mut self, lineno: usize, colno: usize) {
+    pub fn line_break(&mut self, lineno: usize, colno: usize) {
         let (left, right) = self.line_get(lineno).cut(colno);
 
         self.line_new(lineno);
@@ -1483,7 +1496,7 @@ impl Buffer {
     }
 
     // CHECK: from/to should be inclusive
-    fn delete(&mut self, from: Pos, to: Pos) {
+    pub fn delete(&mut self, from: Pos, to: Pos) {
         let mut y_start = usize(from.y);
         let mut y_stop = usize(to.y);
 
@@ -1539,7 +1552,7 @@ impl Buffer {
         }
     }
 
-    fn undo(&mut self) {
+    pub fn undo(&mut self) {
         match self.previous_snapshots.pop() {
             Some(prev_snapshot) => {
                 self.current_snapshot = prev_snapshot
@@ -1548,7 +1561,7 @@ impl Buffer {
         }
     }
 
-    fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) {
+    pub fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) {
         // prepare buffer for insertion: modified line must be copied.
         // BUG: this probably needs to be only done on the first PendingInsert thing
         // actually !
@@ -1565,6 +1578,35 @@ impl Buffer {
         }
     }
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InsertMode {
+    Insert,
+    Replace,
+}
+
+
+fn file_load(filename: &str) -> Re<Vec<u8>> {
+    let fileinfo = fs::metadata(filename)?;
+    let size = fileinfo.len() as usize;
+
+    let mut buf = vec![0; size];
+    let mut f = fs::File::open(filename)?;
+
+    let nread = f.read(&mut buf)?;
+    if nread != size {
+        return er!("not enough bytes");
+    }
+
+    Ok(buf)
+}
+
+
+} // mod text
+
+
+/* COMMAND AND BUFFER MANIPULATION */
 
 impl Commandstate {
     fn do_command(&mut self, op: CommandOp, e: &mut Editor) -> Re<Mode> {
@@ -1785,38 +1827,9 @@ impl Editor {
 }
 
 
-
-
-
-
-
-// TODO: associate this to a Buffer struct
-// TODO: probably I need to collapse all errors into strings, and create my own Result alias ...
-fn file_load(filename: &str) -> Re<Vec<u8>> {
-    let fileinfo = fs::metadata(filename)?;
-    let size = fileinfo.len() as usize;
-
-    let mut buf = vec![0; size];
-    let mut f = fs::File::open(filename)?;
-
-    let nread = f.read(&mut buf)?;
-    if nread != size {
-        return er!("not enough bytes");
-    }
-
-    Ok(buf)
-}
-
-
-fn main() {
-    let term = Term::set_raw().unwrap();
-
-    Editor::run().unwrap();
-}
-
-
 /* TERMINAL BINDINGS */
 mod term {
+
 
 use std::fmt;
 use std::cmp::max;
@@ -1833,6 +1846,7 @@ use conf::CONF;
 use core::*;
 use util::*;
 
+
 #[repr(C)]
 struct TermWinsize {
     ws_row: u16,
@@ -1840,6 +1854,7 @@ struct TermWinsize {
     ws_xpixel: u16,
     ws_ypixel: u16,
 }
+
 
 #[link(name = "term", kind = "static")]
 extern "C" {
@@ -1849,8 +1864,10 @@ extern "C" {
     fn read_1B() -> i32;
 }
 
+
 // Global variable for ensuring terminal restore happens once exactly.
 static mut is_raw : bool = false;
+
 
 // Empty object used to safely control terminal raw mode and properly exit raw mode at scope exit.
 pub struct Term {
@@ -1922,7 +1939,7 @@ impl Term {
 }
 
 
-// CLEANUP: this should have to be exposed
+// CLEANUP: this should not have to be exposed
 pub const term_start                      : &[u8] = b"\x1b[";
 pub const term_finish                     : &[u8] = b"\x1b[0m";
 pub const term_clear                      : &[u8] = b"\x1bc";
@@ -2021,6 +2038,7 @@ impl Input {
         }
     }
 }
+
 
 pub const CTRL_AT               : char = '\x00';
 pub const CTRL_A                : char = '\x01';
