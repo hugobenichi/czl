@@ -7,22 +7,19 @@
 
 use std::cmp::max;
 use std::cmp::min;
-use std::error::Error;
-use std::fmt::Display;
 use std::fmt;
 use std::fs;
-use std::fs::File;
+use std::io;
 use std::io::Read;
 use std::io::Write;
-use std::io;
 use std::mem::replace;
-use std::sync::mpsc::Receiver;
-use std::sync::mpsc::SyncSender;
 use std::sync::mpsc;
-use std::thread;
 
+use conf::*;
+use core::*;
+use term::*;
+use util::*;
 
-use geometry::*;
 
 macro_rules! check {
     ($test:expr, $cause:expr) => {
@@ -30,12 +27,6 @@ macro_rules! check {
     };
     ($test:expr) => {
         check!($test, "unknown")
-    };
-}
-
-macro_rules! er {
-    ($cause: expr) => {
-        Err(Er { descr: format!("{}:{} cause: {}", file!(), line!(), $cause) })
     };
 }
 
@@ -72,9 +63,14 @@ macro_rules! er {
  */
 
 
+mod conf {
+
+
+use core::*;
+
 
 // Global constant that controls a bunch of options.
-const CONF : Config = Config {
+pub const CONF : Config = Config {
     draw_screen:            true,
     draw_colors:            true,
     retain_frame:           false,
@@ -88,6 +84,7 @@ const CONF : Config = Config {
     cursor_show_line:       true,
     cursor_show_column:     true,
 
+    // CLEANUP: use colorcell
     color_default:          Colorcell { fg: Color::Black,   bg: Color::White },
     color_header_active:    Colorcell { fg: Color::Gray(2), bg: Color::Yellow },
     color_header_inactive:  Colorcell { fg: Color::Gray(2), bg: Color::Cyan },
@@ -102,6 +99,39 @@ const CONF : Config = Config {
 
     logfile:                &"/tmp/czl.log",
 };
+
+
+pub struct Config {
+    pub draw_screen:            bool,
+    pub draw_colors:            bool,
+    pub retain_frame:           bool,
+    pub no_raw_mode:            bool,
+
+    pub debug_console:          bool,
+    pub debug_bounds:           bool,
+    pub debug_latency:          bool,
+
+    pub relative_lineno:        bool,
+    pub cursor_show_line:       bool,
+    pub cursor_show_column:     bool,
+
+    pub color_default:          Colorcell,
+    pub color_header_active:    Colorcell,
+    pub color_header_inactive:  Colorcell,
+    pub color_footer:           Colorcell,
+    pub color_lineno:           Colorcell,
+    pub color_console:          Colorcell,
+    pub color_cursor_lines:     Colorcell,
+
+    pub color_mode_command:     Colorcell,
+    pub color_mode_insert:      Colorcell,
+    pub color_mode_exit:        Colorcell,
+
+    pub logfile:                &'static str,
+}
+
+
+} // mod conf
 
 
 // TODO: experiment with a static framebuffer that has a &mut[u8] instead of a vec.
@@ -128,72 +158,8 @@ struct Editor {
 }
 
 
-struct Config {
-    draw_screen:            bool,
-    draw_colors:            bool,
-    retain_frame:           bool,
-    no_raw_mode:            bool,
 
-    debug_console:          bool,
-    debug_bounds:           bool,
-    debug_latency:          bool,
 
-    relative_lineno:        bool,
-    cursor_show_line:       bool,
-    cursor_show_column:     bool,
-
-    color_default:          Colorcell,
-    color_header_active:    Colorcell,
-    color_header_inactive:  Colorcell,
-    color_footer:           Colorcell,
-    color_lineno:           Colorcell,
-    color_console:          Colorcell,
-    color_cursor_lines:     Colorcell,
-
-    color_mode_command:     Colorcell,
-    color_mode_insert:      Colorcell,
-    color_mode_exit:        Colorcell,
-
-    logfile:                &'static str,
-}
-
-type Colorcode = i32;
-
-#[derive(PartialEq, Debug, Clone, Copy)]
-enum Color {
-    /* First 8 ansi colors */
-    Black,
-    Red,
-    Green,
-    Yellow,
-    Blue,
-    Magenta,
-    Cyan,
-    White,
-    /* High contrast 8 ansi colors */
-    BoldBlack,
-    BoldRed,
-    BoldGreen,
-    BoldYellow,
-    BoldBlue,
-    BoldMagenta,
-    BoldCyan,
-    BoldWhite,
-    /* 6 x 6 x 6 RGB colors = 216 colors */
-    RGB216 { r: i32, g: i32, b: i32 },
-    /* 24 level of Grays */
-    Gray(i32),
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Colorcell {
-    fg: Color,
-    bg: Color,
-}
-
-fn colorcell(fg: Color, bg: Color) -> Colorcell {
-    Colorcell { fg, bg }
-}
 
 #[derive(Debug)]
 enum Move {
@@ -354,21 +320,6 @@ impl Mode {
             _                               => Noop,
         }
     }
-}
-
-// The struct that manages compositing.
-struct Framebuffer {
-    window:     Pos,
-    len:        i32,
-
-    text:       Vec<u8>,
-                // TODO: store u8 instead and use two tables
-                // for color -> u8 -> control string conversions
-    fg:         Vec<Color>,
-    bg:         Vec<Color>,
-    cursor:     Pos,            // Absolute screen coordinate relative to (0,0).
-
-    buffer:     Vec<u8>,
 }
 
 
@@ -588,18 +539,80 @@ impl View {
 }
 
 
-// + everything needed for input processing ...
 
 
+/* CORE TYPES */
+mod core {
 
 
-/* CORE TYPES IMPLS */
+use fmt;
+use std;
+use std::ops::Add;
+use std::ops::Neg;
+use std::ops::Sub;
 
-// TODO: better name for that
-mod geometry {
 
-    use std;
-    use fmt;
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum Color {
+    /* First 8 ansi colors */
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    /* High contrast 8 ansi colors */
+    BoldBlack,
+    BoldRed,
+    BoldGreen,
+    BoldYellow,
+    BoldBlue,
+    BoldMagenta,
+    BoldCyan,
+    BoldWhite,
+    /* 6 x 6 x 6 RGB colors = 216 colors */
+    RGB216 { r: i32, g: i32, b: i32 },
+    /* 24 level of Grays */
+    Gray(i32),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Colorcell {
+    pub fg: Color,
+    pub bg: Color,
+}
+
+pub fn colorcell(fg: Color, bg: Color) -> Colorcell {
+    Colorcell { fg, bg }
+}
+
+pub fn colorcode(c : Color) -> i32 {
+    use Color::*;
+    match c {
+        // TODO !
+        Black                    => 0,
+        Red                      => 1,
+        Green                    => 2,
+        Yellow                   => 3,
+        Blue                     => 4,
+        Magenta                  => 5,
+        Cyan                     => 6,
+        White                    => 7,
+        BoldBlack                => 8,
+        BoldRed                  => 9,
+        BoldGreen                => 10,
+        BoldYellow               => 11,
+        BoldBlue                 => 12,
+        BoldMagenta              => 13,
+        BoldCyan                 => 14,
+        BoldWhite                => 15,
+        RGB216 { r, g, b }       => 15 + (r + 6 * (g + 6 * b)),
+        Gray(g)                  => 255 - g,
+    }
+}
+
 
 // Either a position in 2d space w.r.t to (0,0), or a movement quantity
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -691,8 +704,6 @@ impl Rec {
     }
 }
 
-/* Pos/Pos ops */
-
 impl Pos {
     pub fn rec(self) -> Rec {
         Rec {
@@ -715,7 +726,7 @@ impl fmt::Display for Pos {
     }
 }
 
-impl std::ops::Add<Pos> for Pos {
+impl Add<Pos> for Pos {
     type Output = Pos;
 
     fn add(self, v: Pos) -> Pos {
@@ -723,7 +734,7 @@ impl std::ops::Add<Pos> for Pos {
     }
 }
 
-impl std::ops::Sub<Pos> for Pos {
+impl Sub<Pos> for Pos {
     type Output = Pos;
 
     fn sub(self, v: Pos) -> Pos {
@@ -731,7 +742,7 @@ impl std::ops::Sub<Pos> for Pos {
     }
 }
 
-impl std::ops::Neg for Pos {
+impl Neg for Pos {
     type Output = Pos;
 
     fn neg(self) -> Pos {
@@ -739,9 +750,7 @@ impl std::ops::Neg for Pos {
     }
 }
 
-/* Pos/Rec ops */
-
-impl std::ops::Add<Pos> for Rec {
+impl Add<Pos> for Rec {
     type Output = Rec;
 
     fn add(self, v: Pos) -> Rec {
@@ -752,7 +761,7 @@ impl std::ops::Add<Pos> for Rec {
     }
 }
 
-impl std::ops::Add<Rec> for Pos {
+impl Add<Rec> for Pos {
     type Output = Rec;
 
     fn add(self, r: Rec) -> Rec {
@@ -760,7 +769,7 @@ impl std::ops::Add<Rec> for Pos {
     }
 }
 
-impl std::ops::Sub<Pos> for Rec {
+impl Sub<Pos> for Rec {
     type Output = Rec;
 
     fn sub(self, v: Pos) -> Rec {
@@ -772,46 +781,41 @@ impl std::ops::Sub<Pos> for Rec {
 }
 
 
-}
-
-/* Colors */
-
-fn colorcode(c : Color) -> Colorcode {
-    use Color::*;
-    match c {
-        // TODO !
-        Black                    => 0,
-        Red                      => 1,
-        Green                    => 2,
-        Yellow                   => 3,
-        Blue                     => 4,
-        Magenta                  => 5,
-        Cyan                     => 6,
-        White                    => 7,
-        BoldBlack                => 8,
-        BoldRed                  => 9,
-        BoldGreen                => 10,
-        BoldYellow               => 11,
-        BoldBlue                 => 12,
-        BoldMagenta              => 13,
-        BoldCyan                 => 14,
-        BoldWhite                => 15,
-        RGB216 { r, g, b }       => 15 + (r + 6 * (g + 6 * b)),
-        Gray(g)                  => 255 - g,
-    }
-}
-
+} // mod core
 
 /* UTILITIES */
+#[macro_use]
+mod util {
 
-type Re<T> = Result<T, Er>;
 
-#[derive(Debug)]
-struct Er {
-    descr: String,
+use std;
+use std::cmp::max;
+use std::cmp::min;
+use std::error::Error;
+use std::io;
+use std::io::Write;
+use std::fs;
+use std::fmt;
+use std::sync::mpsc;
+
+use conf::CONF;
+
+
+macro_rules! er {
+    ($cause: expr) => {
+        Err(Er { descr: format!("{}:{} cause: {}", file!(), line!(), $cause) })
+    };
 }
 
-impl Display for Er {
+
+pub type Re<T> = Result<T, Er>;
+
+#[derive(Debug)]
+pub struct Er {
+    pub descr: String,
+}
+
+impl fmt::Display for Er {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(&self.descr)
     }
@@ -836,13 +840,13 @@ impl From<mpsc::RecvError> for Er {
     }
 }
 
-struct Scopeclock<'a> {
+pub struct Scopeclock<'a> {
     tag: &'a str,
     timestamp: std::time::SystemTime,
 }
 
 impl <'a> Scopeclock<'a> {
-    fn measure(tag: &'a str) -> Scopeclock {
+    pub fn measure(tag: &'a str) -> Scopeclock {
         let timestamp = std::time::SystemTime::now();
 
         Scopeclock { tag, timestamp }
@@ -862,7 +866,7 @@ impl <'a> Drop for Scopeclock<'a> {
 }
 
 
-fn itoa10(dst: &mut [u8], x: i32, padding: u8) {
+pub fn itoa10(dst: &mut [u8], x: i32, padding: u8) {
     fill(dst, padding);
     let mut y = x.abs();
     let mut idx = dst.len() - 1;
@@ -886,38 +890,37 @@ fn itoa10(dst: &mut [u8], x: i32, padding: u8) {
     }
 }
 
-
 // Because lame casting syntax
-fn usize(x: i32) -> usize {
+pub fn usize(x: i32) -> usize {
     x as usize
 }
 
-fn i32(x: usize) -> i32 {
+pub fn i32(x: usize) -> i32 {
     x as i32
 }
 
 // CLEANUP: replace with memset if this is ever a thing in Rust
-fn fill<T>(s: &mut [T], t: T) where T : Copy {
+pub fn fill<T>(s: &mut [T], t: T) where T : Copy {
     for i in s.iter_mut() {
         *i = t
     }
 }
 
-fn copy_exact<T>(dst: &mut [T], src: &[T]) where T : Copy {
+pub fn copy_exact<T>(dst: &mut [T], src: &[T]) where T : Copy {
     dst.clone_from_slice(src)
 }
 
-fn copy<T>(dst: &mut [T], src: &[T]) where T : Copy {
+pub fn copy<T>(dst: &mut [T], src: &[T]) where T : Copy {
     let n = min(dst.len(), src.len());
     copyn(dst, src, n)
 }
 
-fn copyn<T>(dst: &mut [T], src: &[T], n: usize) where T : Copy {
+pub fn copyn<T>(dst: &mut [T], src: &[T], n: usize) where T : Copy {
     dst[..n].clone_from_slice(&src[..n])
 }
 
 // CLEANUP: replace with std memchr when this make it into stable
-fn memchr(c: u8, s: &[u8]) -> Option<usize> {
+pub fn memchr(c: u8, s: &[u8]) -> Option<usize> {
     for (i, &x) in s.iter().enumerate() {
         if x == c {
             return Some(i)
@@ -926,20 +929,102 @@ fn memchr(c: u8, s: &[u8]) -> Option<usize> {
     None
 }
 
-fn clamp<'a, T>(s: &'a[T], l: usize) -> &'a[T] {
+pub fn clamp<'a, T>(s: &'a[T], l: usize) -> &'a[T] {
     &s[..min(l, s.len())]
 }
 
-fn shift<'a, T>(s: &'a[T], o: usize) -> &'a[T] {
+pub fn shift<'a, T>(s: &'a[T], o: usize) -> &'a[T] {
     &s[min(o, s.len())..]
 }
 
-fn subslice<'a, T>(s: &'a[T], offset: usize, len: usize) -> &'a[T] {
+pub fn subslice<'a, T>(s: &'a[T], offset: usize, len: usize) -> &'a[T] {
     clamp(shift(s, offset), len)
 }
 
+// TODO: persist the file handle instead of opening/closing at every frame ...
+pub fn logd<'a>(m: &'a str) {
+    let mut file = fs::OpenOptions::new().create(true)
+                                         .read(true)
+                                         .append(true)
+                                         .open(&CONF.logfile)
+                                         .unwrap();
+    file.write(m.as_bytes()).unwrap();
+}
+
+
+pub fn log(msg: &str) {
+    if !CONF.debug_console {
+        return
+    }
+    unsafe {
+        CONSOLE.log(msg);
+    }
+}
+
+// For the sake of simplicity, this is not wrapped into a thread_local!(RefCell::new(...)).
+pub static mut CONSOLE : Debugconsole = Debugconsole {
+    width:      48,
+    height:     16,
+    next_entry: 0,
+    text:       [0; 48 * 16],
+};
+
+pub struct Debugconsole {
+    pub width:      i32,
+    pub height:     i32,
+    pub next_entry: i32,
+    pub text:       [u8; 16 * 48],
+}
+
+impl Debugconsole {
+    pub fn clear() {
+        unsafe {
+            CONSOLE.next_entry = 0;
+        }
+    }
+
+    pub fn get_line<'a>(&'a self, i: i32) -> &'a [u8] {
+        let src_start = usize(self.width * (i % self.height));
+        let src_stop = src_start + usize(self.width);
+        &self.text[src_start..src_stop]
+    }
+
+    pub fn get_line_mut<'a>(&'a mut self, i: i32) -> &'a mut [u8] {
+        let src_start = usize(self.width * (i % self.height));
+        let src_stop = src_start + usize(self.width);
+        &mut self.text[src_start..src_stop]
+    }
+
+    pub fn log(&mut self, msg: &str) {
+        let i = self.next_entry;
+        self.next_entry += 1;
+        let line = self.get_line_mut(i);
+        fill(line, ' ' as u8);
+        copy(line, msg.as_bytes());
+    }
+}
+
+
+} // mod util
+
+
 /* CORE TYPE IMPLEMENTATION */
 
+
+// The struct that manages compositing.
+struct Framebuffer {
+    window:     Pos,
+    len:        i32,
+
+    text:       Vec<u8>,
+                // TODO: store u8 instead and use two tables
+                // for color -> u8 -> control string conversions
+    fg:         Vec<Color>,
+    bg:         Vec<Color>,
+    cursor:     Pos,            // Absolute screen coordinate relative to (0,0).
+
+    buffer:     Vec<u8>,
+}
 
 const frame_default_text : u8 = ' ' as u8;
 const frame_default_fg : Color = Color::Black;
@@ -1024,7 +1109,7 @@ impl Framebuffer {
         }
 
         unsafe {
-            CONSOLE.write_into(self);
+            self.dump_console(&CONSOLE);
         }
 
         fn append(dst: &mut Vec<u8>, src: &[u8]) {
@@ -1099,78 +1184,25 @@ impl Framebuffer {
         }
         b
     }
-}
 
-
-fn log(msg: &str) {
-    if !CONF.debug_console {
-        return
-    }
-    unsafe {
-        CONSOLE.log(msg);
-    }
-}
-
-// For the sake of simplicity, this is not wrapped into a thread_local!(RefCell::new(...)).
-static mut CONSOLE : Debugconsole = Debugconsole {
-    width:      48,
-    height:     16,
-    next_entry: 0,
-    text:       [0; 48 * 16],
-};
-
-struct Debugconsole {
-    width:      i32,
-    height:     i32,
-    next_entry: i32,
-    text:       [u8; 16 * 48],
-}
-
-impl Debugconsole {
-    fn clear() {
-        unsafe {
-            CONSOLE.next_entry = 0;
-        }
-    }
-
-    fn get_line<'a>(&'a self, i: i32) -> &'a [u8] {
-        let src_start = usize(self.width * (i % self.height));
-        let src_stop = src_start + usize(self.width);
-        &self.text[src_start..src_stop]
-    }
-
-    fn get_line_mut<'a>(&'a mut self, i: i32) -> &'a mut [u8] {
-        let src_start = usize(self.width * (i % self.height));
-        let src_stop = src_start + usize(self.width);
-        &mut self.text[src_start..src_stop]
-    }
-
-    fn log(&mut self, msg: &str) {
-        let i = self.next_entry;
-        self.next_entry += 1;
-        let line = self.get_line_mut(i);
-        fill(line, ' ' as u8);
-        copy(line, msg.as_bytes());
-    }
-
-    fn write_into(&self, framebuffer: &mut Framebuffer) {
+    fn dump_console(&mut self, console: &Debugconsole) {
         if !CONF.debug_console {
             return
         }
 
-        let size = pos(self.width, min(self.next_entry, self.height));
+        let size = pos(console.width, min(console.next_entry, console.height));
         let consoleoffset = - pos(0,1); // don't overwrite the footer.
-        let consolearea = Rec { min: framebuffer.window - size, max: framebuffer.window } + consoleoffset;
+        let consolearea = Rec { min: self.window - size, max: self.window } + consoleoffset;
 
-        let start = max(0, self.next_entry - self.height);
-        for i in start..self.next_entry {
-            let dst_offset = consolearea.max - pos(self.width, self.next_entry - i);
-            framebuffer.put_line(dst_offset, self.get_line(i));
+        let start = max(0, console.next_entry - console.height);
+        for i in start..console.next_entry {
+            let dst_offset = consolearea.max - pos(console.width, console.next_entry - i);
+            self.put_line(dst_offset, console.get_line(i));
         }
-        framebuffer.put_color(consolearea, CONF.color_console);
+        self.put_color(consolearea, CONF.color_console);
     }
-}
 
+}
 
 impl<'a> Screen<'a> {
     fn mk_screen<'b>(window: Rec, framebuffer: &'b mut Framebuffer, view: &'b View) -> Screen<'b> {
@@ -1362,7 +1394,7 @@ impl Buffer {
 
     // TODO: propagate errors
     fn to_file(&self, path: &str) -> Re<()> {
-        let mut f = File::create(path)?;
+        let mut f = fs::File::create(path)?;
 
         for i in 0..self.nlines() {
             f.write_all(self.line_get_slice(pos(0,i)))?;
@@ -1684,7 +1716,7 @@ impl Editor {
 
         let (send, recv) = mpsc::sync_channel(32);
 
-        thread::spawn(move || {
+        std::thread::spawn(move || {
             push_char(&send);
         });
 
@@ -1765,7 +1797,7 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
     let size = fileinfo.len() as usize;
 
     let mut buf = vec![0; size];
-    let mut f = File::open(filename)?;
+    let mut f = fs::File::open(filename)?;
 
     let nread = f.read(&mut buf)?;
     if nread != size {
@@ -1776,12 +1808,6 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
 }
 
 
-// TODO: persist the file handle instead of opening/closing at every frame ...
-fn logd<'a>(m: &'a str) {
-    let mut file = fs::OpenOptions::new().read(true).append(true).open(&CONF.logfile).unwrap();
-    file.write(m.as_bytes()).unwrap();
-}
-
 fn main() {
     let term = Term::set_raw().unwrap();
 
@@ -1790,6 +1816,22 @@ fn main() {
 
 
 /* TERMINAL BINDINGS */
+mod term {
+
+use std::fmt;
+use std::cmp::max;
+use std::cmp::min;
+use std::error::Error;
+use std::io;
+use std::io::Read;
+use std::io::Write;
+use std::panic;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::SyncSender;
+
+use conf::CONF;
+use core::*;
+use util::*;
 
 #[repr(C)]
 struct TermWinsize {
@@ -1811,7 +1853,7 @@ extern "C" {
 static mut is_raw : bool = false;
 
 // Empty object used to safely control terminal raw mode and properly exit raw mode at scope exit.
-struct Term {
+pub struct Term {
 }
 
 impl Drop for Term {
@@ -1821,14 +1863,14 @@ impl Drop for Term {
 }
 
 impl Term {
-    fn size() -> Pos {
+    pub fn size() -> Pos {
         unsafe {
             let ws = terminal_get_size();
             pos(ws.ws_col as i32, ws.ws_row as i32)
         }
     }
 
-    fn set_raw() -> Re<Term> {
+    pub fn set_raw() -> Re<Term> {
         if !CONF.no_raw_mode {
             let stdout = io::stdout();
             let mut h = stdout.lock();
@@ -1844,8 +1886,8 @@ impl Term {
             }
 
             // Ensure terminal is restored to default whenever a panic happens.
-            let std_panic_hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |panicinfo| {
+            let std_panic_hook = panic::take_hook();
+            panic::set_hook(Box::new(move |panicinfo| {
                 Term::restore();
                 std_panic_hook(panicinfo);
             }));
@@ -1880,31 +1922,31 @@ impl Term {
 }
 
 
-const term_start                      : &[u8] = b"\x1b[";
-const term_finish                     : &[u8] = b"\x1b[0m";
-const term_clear                      : &[u8] = b"\x1bc";
-const term_cursor_hide                : &[u8] = b"\x1b[?25l";
-const term_cursor_show                : &[u8] = b"\x1b[?25h";
-const term_cursor_save                : &[u8] = b"\x1b[s";
-const term_cursor_restore             : &[u8] = b"\x1b[u";
-const term_switch_offscreen           : &[u8] = b"\x1b[?47h";
-const term_switch_mainscreen          : &[u8] = b"\x1b[?47l";
-const term_switch_mouse_event_on      : &[u8] = b"\x1b[?1000h";
-const term_switch_mouse_tracking_on   : &[u8] = b"\x1b[?1002h";
-const term_switch_mouse_tracking_off  : &[u8] = b"\x1b[?1002l";
-const term_switch_mouse_event_off     : &[u8] = b"\x1b[?1000l";
-const term_switch_focus_event_on      : &[u8] = b"\x1b[?1004h";
-const term_switch_focus_event_off     : &[u8] = b"\x1b[?1004l";
-const term_gohome                     : &[u8] = b"\x1b[H";
-const term_newline                    : &[u8] = b"\r\n";
-
+// CLEANUP: this should have to be exposed
+pub const term_start                      : &[u8] = b"\x1b[";
+pub const term_finish                     : &[u8] = b"\x1b[0m";
+pub const term_clear                      : &[u8] = b"\x1bc";
+pub const term_cursor_hide                : &[u8] = b"\x1b[?25l";
+pub const term_cursor_show                : &[u8] = b"\x1b[?25h";
+pub const term_cursor_save                : &[u8] = b"\x1b[s";
+pub const term_cursor_restore             : &[u8] = b"\x1b[u";
+pub const term_switch_offscreen           : &[u8] = b"\x1b[?47h";
+pub const term_switch_mainscreen          : &[u8] = b"\x1b[?47l";
+pub const term_switch_mouse_event_on      : &[u8] = b"\x1b[?1000h";
+pub const term_switch_mouse_tracking_on   : &[u8] = b"\x1b[?1002h";
+pub const term_switch_mouse_tracking_off  : &[u8] = b"\x1b[?1002l";
+pub const term_switch_mouse_event_off     : &[u8] = b"\x1b[?1000l";
+pub const term_switch_focus_event_on      : &[u8] = b"\x1b[?1004h";
+pub const term_switch_focus_event_off     : &[u8] = b"\x1b[?1004l";
+pub const term_gohome                     : &[u8] = b"\x1b[H";
+pub const term_newline                    : &[u8] = b"\r\n";
 
 
 /* KEY INPUT HANDLING */
 
 // TODO: pretty print control codes
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Input {
+pub enum Input {
     Noinput,
     Key(char),
     Click(Pos),
@@ -1980,51 +2022,50 @@ impl Input {
     }
 }
 
-const CTRL_AT               : char = '\x00';
-const CTRL_A                : char = '\x01';
-const CTRL_B                : char = '\x02';
-const CTRL_C                : char = '\x03';
-const CTRL_D                : char = '\x04';
-const CTRL_E                : char = '\x05';
-const CTRL_F                : char = '\x06';
-const CTRL_G                : char = '\x07';
-const CTRL_H                : char = '\x08';
-const CTRL_I                : char = '\x09';
-const CTRL_J                : char = '\x0a';
-const CTRL_K                : char = '\x0b';
-const CTRL_L                : char = '\x0c';
-const CTRL_M                : char = '\x0d';
-const CTRL_N                : char = '\x0e';
-const CTRL_O                : char = '\x0f';
-const CTRL_P                : char = '\x10';
-const CTRL_Q                : char = '\x11';
-const CTRL_R                : char = '\x12';
-const CTRL_S                : char = '\x13';
-const CTRL_T                : char = '\x14';
-const CTRL_U                : char = '\x15';
-const CTRL_V                : char = '\x16';
-const CTRL_W                : char = '\x17';
-const CTRL_X                : char = '\x18';
-const CTRL_Y                : char = '\x19';
-const CTRL_Z                : char = '\x1a';
-const CTRL_LEFT_BRACKET     : char = '\x1b';
-const CTRL_BACKSLASH        : char = '\x1c';
-const CTRL_RIGHT_BRACKET    : char = '\x1d';
-const CTRL_CARET            : char = '\x1e';
-const CTRL_UNDERSCORE       : char = '\x1f';
-const DEL                   : char = '\x7f';
-const ESC                   : char = CTRL_LEFT_BRACKET;
-const BACKSPACE             : char = CTRL_H;
-const TAB                   : char = CTRL_I;
-const LINE_FEED             : char = CTRL_J;
-const VTAB                  : char = CTRL_K;
-const NEW_PAGE              : char = CTRL_L;
-const ENTER                 : char = CTRL_M;
+pub const CTRL_AT               : char = '\x00';
+pub const CTRL_A                : char = '\x01';
+pub const CTRL_B                : char = '\x02';
+pub const CTRL_C                : char = '\x03';
+pub const CTRL_D                : char = '\x04';
+pub const CTRL_E                : char = '\x05';
+pub const CTRL_F                : char = '\x06';
+pub const CTRL_G                : char = '\x07';
+pub const CTRL_H                : char = '\x08';
+pub const CTRL_I                : char = '\x09';
+pub const CTRL_J                : char = '\x0a';
+pub const CTRL_K                : char = '\x0b';
+pub const CTRL_L                : char = '\x0c';
+pub const CTRL_M                : char = '\x0d';
+pub const CTRL_N                : char = '\x0e';
+pub const CTRL_O                : char = '\x0f';
+pub const CTRL_P                : char = '\x10';
+pub const CTRL_Q                : char = '\x11';
+pub const CTRL_R                : char = '\x12';
+pub const CTRL_S                : char = '\x13';
+pub const CTRL_T                : char = '\x14';
+pub const CTRL_U                : char = '\x15';
+pub const CTRL_V                : char = '\x16';
+pub const CTRL_W                : char = '\x17';
+pub const CTRL_X                : char = '\x18';
+pub const CTRL_Y                : char = '\x19';
+pub const CTRL_Z                : char = '\x1a';
+pub const CTRL_LEFT_BRACKET     : char = '\x1b';
+pub const CTRL_BACKSLASH        : char = '\x1c';
+pub const CTRL_RIGHT_BRACKET    : char = '\x1d';
+pub const CTRL_CARET            : char = '\x1e';
+pub const CTRL_UNDERSCORE       : char = '\x1f';
+pub const DEL                   : char = '\x7f';
+pub const ESC                   : char = CTRL_LEFT_BRACKET;
+pub const BACKSPACE             : char = CTRL_H;
+pub const TAB                   : char = CTRL_I;
+pub const LINE_FEED             : char = CTRL_J;
+pub const VTAB                  : char = CTRL_K;
+pub const NEW_PAGE              : char = CTRL_L;
+pub const ENTER                 : char = CTRL_M;
 
-const RESIZE                : char = 255 as char; //'\xff';
+pub const RESIZE                : char = 255 as char; //'\xff';
 
-
-fn is_printable(c : char) -> bool {
+pub fn is_printable(c : char) -> bool {
     ESC < c && c < DEL
 }
 
@@ -2041,7 +2082,7 @@ fn is_printable(c : char) -> bool {
 //}
 
 
-fn push_char(chan: &SyncSender<char>) {
+pub fn push_char(chan: &SyncSender<char>) {
     let mut stdin = io::stdin();
     let mut buf = [0;1];
     // TODO: handle interrupts when errno == EINTR
@@ -2059,7 +2100,7 @@ fn push_char(chan: &SyncSender<char>) {
     }
 }
 
-fn pull_input(chan: &Receiver<char>) -> Re<Input> {
+pub fn pull_input(chan: &Receiver<char>) -> Re<Input> {
     use Input::*;
     use std::sync::mpsc::TryRecvError::*;
 
@@ -2110,3 +2151,5 @@ fn pull_input(chan: &Receiver<char>) -> Re<Input> {
 
     Ok(r)
 }
+
+} // mod term
