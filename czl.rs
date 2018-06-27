@@ -36,7 +36,6 @@ macro_rules! check {
 /*
  * Features:
  *  - delete and backspace in command mode
- *  - dirty file indicator
  *  - offer to save if panic
  *  - better navigation !
  *  - copy and yank buffer
@@ -44,23 +43,17 @@ macro_rules! check {
  *  - cursor horizontal memory
  *  - buffer explorer
  *  - directory explorer
- *  - recenter screen
  *  - grep move
  *  - cursor previous points and cursor markers
  *  - ctags support
  *
  * TODOs and cleanups
- *  - introduce modules and cleanly separate code
  *  - need to implement char/line next/previous
  *  - BUG: double check Buffer::delete
  *  - BUG: why is there an empty last line at the end !!
- *  - BUG: undo does not restore the cursor to previous point
  *  - migrate text snapshot to command list
  *  - fuzzer
  *  - handle resize
- *  - think more about where to track the screen area:
- *      right now it is repeated both in Screen and in View
- *      ideally Screen would not be tracking it
  *  - utf8 support: Range and Filebuffer, Input, ... don't wait too much
  */
 
@@ -264,7 +257,7 @@ impl Mode {
             }
 
             PendingInsert(mode) => {
-                e.buffer.snapshot();
+                e.buffer.snapshot(e.view.cursor);
                 let insertmode = Insert(Insertstate { mode });
                 Mode::process_input(insertmode, i, e)?
             }
@@ -1369,14 +1362,17 @@ impl Text {
 
 #[derive(Clone)] // Do I need clone ??
 struct Textsnapshot {
-    line_indexes: Vec<usize> // the actual lines in the current files, as indexes into 'lines'
+    line_indexes:   Vec<usize>, // the actual lines in the current files, as indexes into 'lines'
+    dirty:          bool,
+    cursor:         Pos,
 }
 
 // Manage content of a file
 pub struct Buffer {
     textbuffer:             Text,
     previous_snapshots:     Vec<Textsnapshot>,
-    current_snapshot:       Textsnapshot,
+    line_indexes:           Vec<usize>,
+    pub dirty:              bool,
 }
 
 // TODO: this should implement array bracket notation ?
@@ -1429,12 +1425,13 @@ impl Buffer {
         Buffer {
             textbuffer:         Text { text, lines },
             previous_snapshots: Vec::new(),
-            current_snapshot:   Textsnapshot { line_indexes },
+            line_indexes,
+            dirty:              false,
         }
     }
 
     // TODO: propagate errors
-    pub fn to_file(&self, path: &str) -> Re<()> {
+    pub fn to_file(&mut self, path: &str) -> Re<()> {
         let mut f = fs::File::create(path)?;
 
         for i in 0..self.nlines() {
@@ -1442,13 +1439,16 @@ impl Buffer {
             f.write_all(b"\n")?; // TODO: use platform's newline
         }
 
+        self.dirty = false;
+
         Ok(())
     }
 
-    pub fn snapshot(&mut self) {
-        let next_snapshot = self.current_snapshot.clone();
-        let prev_snapshot = replace(&mut self.current_snapshot, next_snapshot);
-        self.previous_snapshots.push(prev_snapshot);
+    pub fn snapshot(&mut self, cursor: Pos) {
+        let line_indexes = self.line_indexes.clone();
+        let dirty = self.dirty;
+        self.previous_snapshots.push(Textsnapshot { line_indexes, dirty, cursor });
+        self.dirty = true;
     }
 
     pub fn char_at(&self, lineno: usize, colno: usize) -> char {
@@ -1456,20 +1456,20 @@ impl Buffer {
     }
 
     pub fn nlines(&self) -> i32 {
-        i32(self.current_snapshot.line_indexes.len())
+        i32(self.line_indexes.len())
     }
 
     pub fn last_line(&self) -> usize {
-        self.current_snapshot.line_indexes.len() - 1
+        self.line_indexes.len() - 1
     }
 
     pub fn line_len(&self, y: usize) -> usize {
-        let idx = self.current_snapshot.line_indexes[y as usize];
+        let idx = self.line_indexes[y as usize];
         self.textbuffer.lines[idx].len()
     }
 
     pub fn line_index(&self, lineno: usize) -> usize {
-        self.current_snapshot.line_indexes[lineno]
+        self.line_indexes[lineno]
     }
 
     fn line_get(&self, lineno: usize) -> Line {
@@ -1492,21 +1492,21 @@ impl Buffer {
     }
 
     pub fn line_del(&mut self, y: usize) {
-        check!(y < self.current_snapshot.line_indexes.len());
-        self.current_snapshot.line_indexes.remove(y);
+        check!(y < self.line_indexes.len());
+        self.line_indexes.remove(y);
 
         // TODO: update all other views of that file whose cursors is below lineno
     }
 
     pub fn line_new(&mut self, lineno: usize) {
-        let lastline = self.current_snapshot.line_indexes.len() - 1;
-        self.current_snapshot.line_indexes.reserve(1);
+        let lastline = self.line_indexes.len() - 1;
+        self.line_indexes.reserve(1);
 // CLEANUP: use Vec.insert
         for i in (lineno..lastline).rev() {
-            self.current_snapshot.line_indexes[i+1] = self.current_snapshot.line_indexes[i];
+            self.line_indexes[i+1] = self.line_indexes[i];
         }
 
-        self.current_snapshot.line_indexes[lineno] = self.textbuffer.emptyline();
+        self.line_indexes[lineno] = self.textbuffer.emptyline();
 
         // TODO: update all other views of that file whose cursors is below lineno
     }
@@ -1546,7 +1546,7 @@ impl Buffer {
                 self.textbuffer.append(c);
             }
 
-            self.current_snapshot.line_indexes[y_start] = newline_idx;
+            self.line_indexes[y_start] = newline_idx;
 
             return
         }
@@ -1570,22 +1570,24 @@ impl Buffer {
         let gap = y_stop - y_start;
         if gap > 0 {
             for i in y_stop..self.last_line() {
-                let line_idx = self.current_snapshot.line_indexes[i];
-                self.current_snapshot.line_indexes[i - gap] = line_idx;
+                let line_idx = self.line_indexes[i];
+                self.line_indexes[i - gap] = line_idx;
             }
             unsafe {
                 let new_nlines = usize(self.nlines()) - gap;
-                self.current_snapshot.line_indexes.set_len(new_nlines);
+                self.line_indexes.set_len(new_nlines);
             }
         }
     }
 
-    pub fn undo(&mut self) {
+    pub fn undo(&mut self) -> Option<Pos> {
         match self.previous_snapshots.pop() {
-            Some(prev_snapshot) => {
-                self.current_snapshot = prev_snapshot
+            Some(sp) => {
+                self.line_indexes = sp.line_indexes;
+                self.dirty = sp.dirty;
+                Some(sp.cursor)
             }
-            None => (),
+            None => None,
         }
     }
 
@@ -1597,7 +1599,7 @@ impl Buffer {
         let line_idx = self.line_index(lineno);
         if line_idx != last_idx {
             let newline_idx = self.textbuffer.copyline(line_idx);
-            self.current_snapshot.line_indexes[lineno] = newline_idx;
+            self.line_indexes[lineno] = newline_idx;
         }
 
         match mode {
@@ -1635,7 +1637,6 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
 
 
 /* COMMAND AND BUFFER MANIPULATION */
-
 impl Commandstate {
     fn do_command(&mut self, op: CommandOp, e: &mut Editor) -> Re<Mode> {
         use CommandOp::*;
@@ -1662,28 +1663,30 @@ impl Commandstate {
             LineDel(pos) => {
                 if e.buffer.nlines() > 0 {
                     let lineno = usize(pos.y);
-                    e.buffer.snapshot();
+                    e.buffer.snapshot(e.view.cursor);
                     e.buffer.line_del(lineno);
                 }
             }
 
             LineNew(pos) => {
                 let lineno = usize(pos.y);
-                e.buffer.snapshot();
+                e.buffer.snapshot(e.view.cursor);
                 e.buffer.line_new(lineno);
             }
 
             LineBreak(Pos { x, y }) => {
                 let lineno = usize(y);
                 let colno = usize(x);
-                e.buffer.snapshot();
+                e.buffer.snapshot(e.view.cursor);
                 e.buffer.line_break(lineno, colno);
                 e.view.cursor = pos(0, y + 1);
             }
 
             Undo => {
-                // TODO: restore the cursor !!
-                e.buffer.undo();
+                match e.buffer.undo() {
+                    Some(p) => e.view.cursor = p,
+                    None => (),
+                };
             }
 
             Redo => (), // TODO: implement redo stack
@@ -1811,7 +1814,10 @@ impl Editor {
         {
             let draw_time = Scopeclock::measure("draw");
 
-            let header = format!("{}  {:?}", self.view.filepath, self.view.movement_mode);
+            let header = format!("{}{} {:?}",
+                    self.view.filepath,
+                    if self.buffer.dirty { "+" } else { " " },
+                    self.view.movement_mode);
             let drawinfo = Drawinfo {
                 header:             &header,
                 buffer:             &self.buffer,
