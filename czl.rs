@@ -48,6 +48,13 @@ macro_rules! check {
  *  - ctags support
  *
  * TODOs and cleanups
+ *  - nothing should directly use Framebuffer, instead always use a Screen !
+ *  - PERF add clear in sub rec to framebuffer and use Draw in Drawinfo to redraw only what's needed
+ *  - PERF: better conversion of colorcode to ascii without strinh allocation !
+ *  - PERF: better cursor position conversion to ascii in render() without string allocs
+ *  - Drawinfo: replace 'buffer' and 'buffer_offset' with iterator of &[u8]
+ *  - Line/Range: implement iterator
+ *  - use split iterator for the file loader ?
  *  - need to implement char/line next/previous
  *  - BUG: double check Buffer::delete
  *  - BUG: why is there an empty last line at the end !!
@@ -60,6 +67,8 @@ macro_rules! check {
 
 fn main() {
     let term = Term::set_raw().unwrap();
+
+    open_logfile(&CONF.logfile).unwrap();
 
     Editor::run().unwrap();
 }
@@ -86,7 +95,6 @@ pub const CONF : Config = Config {
     cursor_show_line:       true,
     cursor_show_column:     true,
 
-    // CLEANUP: use colorcell
     color_default:          Colorcell { fg: Color::Black,   bg: Color::White },
     color_header_active:    Colorcell { fg: Color::Gray(2), bg: Color::Yellow },
     color_header_inactive:  Colorcell { fg: Color::Gray(2), bg: Color::Cyan },
@@ -136,9 +144,6 @@ pub struct Config {
 } // mod conf
 
 
-// TODO: experiment with a static framebuffer that has a &mut[u8] instead of a vec.
-
-
 /* CORE TYPE DEFINITION */
 
 // The core editor structure
@@ -147,14 +152,11 @@ struct Editor {
     mainscreen:     Rec,              // The screen area for displaying file content and menus.
     footer:         Rec,
     framebuffer:    Framebuffer,
-
-    // TODO:
-    //  list of open files and their filebuffers
-    //  list of screens
-    //  current screen layout
-    //  Mode state machine
-
     // For the time being, only one file can be loaded and edited per program.
+    // TODO:
+    //  list of open files and their buffers
+    //  list of screens and views on top of buffers
+    //  current screen layout
     buffer: Buffer,
     view:   View,
 }
@@ -237,7 +239,7 @@ impl Mode {
         }
 
         if i == Input::Resize {
-            log("resize !");
+            logconsole("resize !");
             return Ok(m)
         }
 
@@ -503,14 +505,9 @@ pub struct Colorcell {
     pub bg: Color,
 }
 
-pub fn colorcell(fg: Color, bg: Color) -> Colorcell {
-    Colorcell { fg, bg }
-}
-
 pub fn colorcode(c : Color) -> i32 {
     use Color::*;
     match c {
-        // TODO !
         Black                    => 0,
         Red                      => 1,
         Green                    => 2,
@@ -527,8 +524,8 @@ pub fn colorcode(c : Color) -> i32 {
         BoldMagenta              => 13,
         BoldCyan                 => 14,
         BoldWhite                => 15,
-        RGB216 { r, g, b }       => 15 + (r + 6 * (g + 6 * b)),
-        Gray(g)                  => 255 - g,
+        RGB216 { r, g, b }       => 16 + (b + 6 * (g + 6 * r)),
+        Gray(g)                  => 232 + g,
     }
 }
 
@@ -553,7 +550,6 @@ pub fn pos(x: i32, y: i32) -> Pos {
     Pos { x, y }
 }
 
-// TODO: rec ctor with width and height ??
 pub fn rec(x0: i32, y0: i32, x1: i32, y1: i32) -> Rec {
     let (a0, a1) = ordered(x0, x1);
     let (b0, b1) = ordered(y0, y1);
@@ -780,7 +776,7 @@ impl <'a> Drop for Scopeclock<'a> {
             return
         }
         let dt = self.timestamp.elapsed().unwrap_or(zero_duration);
-        log(&format!("{}: {}.{:06}", self.tag, dt.as_secs(), dt.subsec_nanos() / 1000));
+        logconsole(&format!("{}: {}.{:06}", self.tag, dt.as_secs(), dt.subsec_nanos() / 1000));
     }
 }
 
@@ -860,18 +856,34 @@ pub fn subslice<'a, T>(s: &'a[T], offset: usize, len: usize) -> &'a[T] {
     clamp(shift(s, offset), len)
 }
 
-// TODO: persist the file handle instead of opening/closing at every frame ...
-pub fn logd<'a>(m: &'a str) {
-    let mut file = fs::OpenOptions::new().create(true)
-                                         .read(true)
-                                         .append(true)
-                                         .open(&CONF.logfile)
-                                         .unwrap();
-    file.write(m.as_bytes()).unwrap();
+
+static mut logfile : Option<fs::File> = None;
+
+pub fn open_logfile(filename: &str) -> Re<()> {
+    let file = fs::OpenOptions::new().create(true)
+                                     .read(true)
+                                     .append(true)
+                                     .open(filename)?;
+    unsafe {
+        logfile = Some(file);
+    }
+
+    Ok(())
+}
+
+pub fn logd(m: &str) {
+    unsafe {
+        match logfile {
+            Some(ref mut f) => {
+                let _ = f.write(m.as_bytes());
+            }
+            None => (),
+        }
+    }
 }
 
 
-pub fn log(msg: &str) {
+pub fn logconsole(msg: &str) {
     if !CONF.debug_console {
         return
     }
@@ -928,7 +940,6 @@ impl Debugconsole {
 
 
 /* DRAWING AND FRAME/SCREEN MANAGEMENT */
-// TODO: nothing should directly use Framebuffer, instead always use a Screen !
 mod draw {
 
 
@@ -956,39 +967,31 @@ pub enum Draw {
 // The struct that manages compositing.
 pub struct Framebuffer {
     window:     Pos,
-    len:        i32,
-
     text:       Vec<u8>,
-                // TODO: store u8 instead and use two tables
-                // for color -> u8 -> control string conversions
-    fg:         Vec<Color>,
-    bg:         Vec<Color>,
+    fg:         Vec<i32>,
+    bg:         Vec<i32>,
     cursor:     Pos,            // Absolute screen coordinate relative to (0,0).
-
-    buffer:     Vec<u8>,
+    buffer:     Vec<u8>,        // used for storing frame data before writing to the terminal
 }
 
 const frame_default_text : u8 = ' ' as u8;
-const frame_default_fg : Color = Color::Black;
-const frame_default_bg : Color = Color::White;
+const frame_default_fg : i32 = 0; // Black
+const frame_default_bg : i32 = 7; // White
 
 impl Framebuffer {
     pub fn mk_framebuffer(window: Pos) -> Framebuffer {
-        let len = window.x * window.y;
-        let vlen = len as usize;
+        let len = usize(window.x * window.y);
 
         Framebuffer {
             window,
-            len,
-            text:       vec![frame_default_text; vlen],
-            fg:         vec![frame_default_fg; vlen],
-            bg:         vec![frame_default_bg; vlen],
+            text:       vec![frame_default_text; len],
+            fg:         vec![frame_default_fg; len],
+            bg:         vec![frame_default_bg; len],
             cursor:     pos(0,0),
             buffer:     vec![0; 64 * 1024],
         }
     }
 
-    // TODO: add clear in sub rec
     pub fn clear(&mut self) {
         fill(&mut self.text, frame_default_text);
         fill(&mut self.fg,   frame_default_fg);
@@ -1025,8 +1028,8 @@ impl Framebuffer {
         let mut x1 = xbase + min(area.x1(), self.window.x) as usize;
 
         for i in y0..y1 {
-            fill(&mut self.fg[x0..x1], colors.fg);
-            fill(&mut self.bg[x0..x1], colors.bg);
+            fill(&mut self.fg[x0..x1], colorcode(colors.fg));
+            fill(&mut self.bg[x0..x1], colorcode(colors.bg));
             x0 += dx;
             x1 += dx;
         }
@@ -1042,9 +1045,6 @@ impl Framebuffer {
         self.cursor = pos(x,y);
     }
 
-    // TODO: propagate error
-    // TODO: add color
-    // PERF: skip unchanged sections
     pub fn render(&mut self) -> Re<()> {
         if !CONF.draw_screen {
             return Ok(())
@@ -1079,11 +1079,11 @@ impl Framebuffer {
                 let mut j = l;
                 loop {
                     let k = self.find_color_end(j, r);
-
-                    // PERF: better color command creation without multiple string allocs.
-                    let fg_code = colorcode(self.fg[j]);
-                    let bg_code = colorcode(self.bg[j]);
-                    append(&mut buffer, format!("\x1b[38;5;{};48;5;{}m", fg_code, bg_code).as_bytes());
+                    append(&mut buffer, b"\x1b[38;5;");
+                    append(&mut buffer, format!("{}", self.fg[j]).as_bytes());
+                    append(&mut buffer, b";48;5;");
+                    append(&mut buffer, format!("{}", self.bg[j]).as_bytes());
+                    append(&mut buffer, b"m");
                     append(&mut buffer, &self.text[j..k]);
                     if k == r {
                         break;
@@ -1171,8 +1171,6 @@ impl Screen {
     }
 
     pub fn draw(&self, framebuffer: &mut Framebuffer, drawinfo: &Drawinfo) {
-        // TODO: use draw and only redraw what's needed
-        // TODO: automatize the screen coordinate offsetting for framebuffer commands
         let file_base_offset = drawinfo.buffer_offset;
         let frame_base_offset = self.textarea.min;
 
@@ -1228,7 +1226,6 @@ impl Screen {
 // Helper data object for Screen::draw
 pub struct Drawinfo<'a> {
     pub header:             &'a str,
-    // TODO: replace 'buffer' and 'buffer_offset' with iterator of &[u8]
     pub buffer:             &'a Buffer,
     pub buffer_offset:      Pos,
     pub cursor:             Pos,
@@ -1252,6 +1249,12 @@ use std::mem::replace;
 
 use core::*;
 use util::*;
+
+
+#[cfg(windows)]
+const LINE_ENDING: &'static [u8] = b"\r\n";
+#[cfg(not(windows))]
+const LINE_ENDING: &'static [u8] = b"\n";
 
 
 fn range(start: usize, stop: usize) -> Range {
@@ -1430,13 +1433,12 @@ impl Buffer {
         }
     }
 
-    // TODO: propagate errors
     pub fn to_file(&mut self, path: &str) -> Re<()> {
         let mut f = fs::File::create(path)?;
 
         for i in 0..self.nlines() {
             f.write_all(self.line_get_slice(pos(0,i)))?;
-            f.write_all(b"\n")?; // TODO: use platform's newline
+            f.write_all(LINE_ENDING)?;
         }
 
         self.dirty = false;
@@ -1796,7 +1798,7 @@ impl Editor {
 
         while m != Mode::Exit {
             let i = pull_input(&recv)?;
-            log(&format!("input: {}", i));
+            logconsole(&format!("input: {}", i));
 
             let frame_time = Scopeclock::measure("last frame");     // caveat: displayed on next frame only
 
@@ -2005,7 +2007,6 @@ pub const term_newline                    : &[u8] = b"\r\n";
 
 /* KEY INPUT HANDLING */
 
-// TODO: pretty print control codes
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Input {
     Noinput,
