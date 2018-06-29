@@ -48,10 +48,9 @@ macro_rules! check {
  *  - ctags support
  *
  * TODOs and cleanups
+ *  - use Vec.insert instead in Text::insert and Text::replace
  *  - nothing should directly use Framebuffer, instead always use a Screen !
  *  - PERF add clear in sub rec to framebuffer and use Draw in Drawinfo to redraw only what's needed
- *  - PERF: better conversion of colorcode to ascii without strinh allocation !
- *  - PERF: better cursor position conversion to ascii in render() without string allocs
  *  - Drawinfo: replace 'buffer' and 'buffer_offset' with iterator of &[u8]
  *  - Line/Range: implement iterator
  *  - use split iterator for the file loader ?
@@ -781,7 +780,7 @@ impl <'a> Drop for Scopeclock<'a> {
 }
 
 
-pub fn itoa10(dst: &mut [u8], x: i32, padding: u8) {
+pub fn itoa10_right(dst: &mut [u8], x: i32, padding: u8) {
     fill(dst, padding);
     let mut y = x.abs();
     let mut idx = dst.len() - 1;
@@ -803,6 +802,24 @@ pub fn itoa10(dst: &mut [u8], x: i32, padding: u8) {
     if x < 0 {
         dst[idx - 1] = '-' as u8;
     }
+}
+
+pub fn itoa10_left(dst: &mut [u8], x: i32) -> usize {
+    // Does not handle negative numbers
+    let mut n = 0;
+    let mut y = x.abs();
+    while y != 0 {
+        y /= 10;
+        n += 1;
+    }
+    y = x;
+    let n_digits = n;
+    for i in (0..n).rev() {
+        dst[i] = (y % 10) as u8 + ('0' as u8);
+        y /= 10;
+    }
+
+    n_digits
 }
 
 // Because lame casting syntax
@@ -1069,20 +1086,33 @@ impl Framebuffer {
         let w = self.window.x as usize;
         let mut l = 0;
         let mut r = w;
+        let mut numbuf1 = [0 as u8; 8];
+        let mut numbuf2 = [0 as u8; 8];
+
         for i in 0..self.window.y {
             if i > 0 {
                 // Do not put "\r\n" on the last line
                 append(&mut buffer, term_newline);
             }
 
+
             if CONF.draw_colors {
                 let mut j = l;
                 loop {
                     let k = self.find_color_end(j, r);
-                    append(&mut buffer, b"\x1b[38;5;");
-                    append(&mut buffer, format!("{}", self.fg[j]).as_bytes());
-                    append(&mut buffer, b";48;5;");
-                    append(&mut buffer, format!("{}", self.bg[j]).as_bytes());
+
+                    { // fg color
+                        append(&mut buffer, b"\x1b[38;5;");
+                        let n = itoa10_left(&mut numbuf1, self.fg[j]);
+                        append(&mut buffer, &numbuf1[..n]);
+                    }
+
+                    { // bg color
+                        append(&mut buffer, b";48;5;");
+                        let n = itoa10_left(&mut numbuf2, self.bg[j]);
+                        append(&mut buffer, &numbuf2[..n]);
+                    }
+
                     append(&mut buffer, b"m");
                     append(&mut buffer, &self.text[j..k]);
                     if k == r {
@@ -1098,9 +1128,20 @@ impl Framebuffer {
             r += w;
         }
 
-        // Terminal cursor coodinates start at (1,1)
-        let cursor_command = format!("\x1b[{};{}H", self.cursor.y + 1, self.cursor.x + 1);
-        append(&mut buffer, cursor_command.as_bytes());
+        // cursor
+        {
+            // Terminal cursor coodinates start at (1,1)
+            let y_n = itoa10_left(&mut numbuf1, self.cursor.y + 1);
+            let x_n = itoa10_left(&mut numbuf2, self.cursor.x + 1);
+            append(&mut buffer, b"\x1b[");
+            append(&mut buffer, &numbuf1[..y_n]);
+            append(&mut buffer, b";");
+            append(&mut buffer, &numbuf2[..x_n]);
+            append(&mut buffer, b"H");
+        }
+
+        //let cursor_command = format!("\x1b[{};{}H", self.cursor.y + 1, self.cursor.x + 1);
+        //append(&mut buffer, cursor_command.as_bytes());
         append(&mut buffer, term_cursor_show);
 
         // IO to terminal
@@ -1203,7 +1244,7 @@ impl Screen {
                 file_base_offset.y + 1
             };
             for i in 0..self.textarea.h() {
-                itoa10(&mut buf, lineno_base + i, ' ' as u8);
+                itoa10_right(&mut buf, lineno_base + i, ' ' as u8);
                 framebuffer.put_line(self.linenoarea.min + pos(0,i), &buf);
             }
             framebuffer.put_color(self.linenoarea, CONF.color_lineno);
