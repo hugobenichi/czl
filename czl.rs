@@ -95,15 +95,16 @@ pub const CONF : Config = Config {
     cursor_show_column:     true,
 
     color_default:          Colorcell { fg: Color::Black,   bg: Color::White },
-    color_header_active:    Colorcell { fg: Color::Gray(2), bg: Color::Yellow },
+    color_header_active:    Colorcell { fg: Color::Black,   bg: Color::Yellow },
     color_header_inactive:  Colorcell { fg: Color::Gray(2), bg: Color::Cyan },
-    color_footer:           Colorcell { fg: Color::White,   bg: Color::Gray(2) },
-    color_lineno:           Colorcell { fg: Color::Green,   bg: Color::Gray(2) },
-    color_console:          Colorcell { fg: Color::White,   bg: Color::Gray(16) },
-    color_cursor_lines:     Colorcell { fg: Color::Black,   bg: Color::Gray(6) },
+    color_footer:           Colorcell { fg: Color::White,   bg: Color::Gray(14) },
+    color_lineno:           Colorcell { fg: Color::Green,   bg: Color::White },
+    color_console:          Colorcell { fg: Color::White,   bg: Color::Gray(12) },
+    color_cursor_lines:     Colorcell { fg: Color::Black,   bg: Color::Gray(16) },
 
-    color_mode_command:     Colorcell { fg: Color::Gray(1), bg: Color::Black },
-    color_mode_insert:      Colorcell { fg: Color::Gray(1), bg: Color::Red },
+    color_mode_command:     Colorcell { fg: Color::BoldWhite, bg: Color::Black },
+    color_mode_insert:      Colorcell { fg: Color::BoldWhite, bg: Color::Red },
+    color_mode_replace:     Colorcell { fg: Color::BoldWhite, bg: Color::Magenta },
     color_mode_exit:        Colorcell { fg: Color::Magenta, bg: Color::Magenta },
 
     logfile:                &"/tmp/czl.log",
@@ -134,6 +135,7 @@ pub struct Config {
 
     pub color_mode_command:     Colorcell,
     pub color_mode_insert:      Colorcell,
+    pub color_mode_replace:     Colorcell,
     pub color_mode_exit:        Colorcell,
 
     pub logfile:                &'static str,
@@ -189,25 +191,28 @@ enum MovementMode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
     Command(Commandstate),
-    Insert(Insertstate),
+    Insert(InsertMode),
     PendingInsert(InsertMode),
     Exit,
 }
 
+
+// TODO: eliminate Commandstate and Insertstate and put the data inside the Mode?
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Commandstate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Insertstate {
-    mode: InsertMode,
 }
 
 // Left justified, fixed length strings.
-const MODE_COMMAND : &'static str = "Command";
-const MODE_INSERT  : &'static str = "Insert ";
-const MODE_PINSERT : &'static str = "Insert?";
-const MODE_EXIT    : &'static str = "Exit   ";
+const MODE_COMMAND  : &'static str = "Command  ";
+const MODE_INSERT   : &'static str = "Insert   ";
+const MODE_PINSERT  : &'static str = "Insert?  ";
+const MODE_REPLACE  : &'static str = "Replace  ";
+const MODE_PREPLACE : &'static str = "Replace? ";
+const MODE_EXIT     : &'static str = "Exit     ";
 
 impl Mode {
     const default_command_state : Mode = Mode::Command(Commandstate { });
@@ -215,20 +220,24 @@ impl Mode {
     fn footer_color(self) -> Colorcell {
         use Mode::*;
         match self {
-            Command(_)          => CONF.color_mode_command,
-            Insert(_)           => CONF.color_mode_insert,
-            PendingInsert(_)    => CONF.color_mode_insert,
-            Exit                => CONF.color_mode_exit,
+            Command(_)                              => CONF.color_mode_command,
+            Insert(InsertMode::Insert)              => CONF.color_mode_insert,
+            Insert(InsertMode::Replace)             => CONF.color_mode_replace,
+            PendingInsert(InsertMode::Insert)       => CONF.color_mode_insert,
+            PendingInsert(InsertMode::Replace)      => CONF.color_mode_replace,
+            Exit                                    => CONF.color_mode_exit,
         }
     }
 
     fn name(self) -> &'static str {
         use Mode::*;
         match self {
-            Command(_)          => MODE_COMMAND,
-            Insert(_)           => MODE_INSERT,
-            PendingInsert(_)    => MODE_PINSERT,
-            Exit                => MODE_EXIT,
+            Command(_)                              => MODE_COMMAND,
+            Insert(InsertMode::Insert)              => MODE_INSERT,
+            Insert(InsertMode::Replace)             => MODE_REPLACE,
+            PendingInsert(InsertMode::Insert)       => MODE_PINSERT,
+            PendingInsert(InsertMode::Replace)      => MODE_PREPLACE,
+            Exit                                    => MODE_EXIT,
         }
     }
 
@@ -252,14 +261,14 @@ impl Mode {
                 next
             }
 
-            Insert(mut state) => {
+            Insert(mode) => {
                 let op = Mode::input_to_insert_op(i, e);
-                state.do_insert(op, e)?
+                Insertstate::do_insert(mode, op, e)?
             }
 
             PendingInsert(mode) => {
                 e.buffer.snapshot(e.view.cursor);
-                let insertmode = Insert(Insertstate { mode });
+                let insertmode = Insert(mode);
                 Mode::process_input(insertmode, i, e)?
             }
 
@@ -1359,25 +1368,18 @@ impl Text {
     }
 
     fn insert(&mut self, colno: usize, c: char) {
-        let (left, right) = self.lines.last().unwrap().cut(colno);
-        self.append(' ');
-
-// CLEANUP: use Vec.insert instead
-        for i in (right.start..right.stop).rev() {
-            self.text[i+1] = self.text[i];
-        }
-        self.text[right.start] = c as u8;
+        let line = self.lines.last_mut().unwrap();
+        line.stop += 1;
+        self.text.insert(line.start + colno, c as u8);
     }
 
     fn replace(&mut self, colno: usize, c: char) {
         let line = *self.lines.last().unwrap();
-
-// CLEANUP: use Vec.insert instead ?
         if colno == line.len() {
-            self.append(' ');
+            self.append(c);
+        } else {
+            self.text[line.start + colno] = c as u8;
         }
-
-        self.text[line.start + colno] = c as u8;
     }
 
     fn emptyline(&mut self) -> usize {
@@ -1756,7 +1758,7 @@ impl Commandstate {
 }
 
 impl Insertstate {
-    fn do_insert(&mut self, op: InsertOp, e: &mut Editor) -> Re<Mode> {
+    fn do_insert(mode: InsertMode, op: InsertOp, e: &mut Editor) -> Re<Mode> {
         use InsertOp::*;
         match op {
             LineBreak(Pos { x, y }) => {
@@ -1766,7 +1768,7 @@ impl Insertstate {
 
             CharInsert(Pos { x, y }, c) => {
                 if is_printable(c) {
-                    e.buffer.insert(self.mode, usize(y), usize(x), c);
+                    e.buffer.insert(mode, usize(y), usize(x), c);
                     e.view.cursor = pos(x + 1, y);
                     // TODO: think about auto linebreak
                 }
@@ -1793,7 +1795,7 @@ impl Insertstate {
         }
 
         // TODO: can I  just return something new and dorp self here ???
-        Ok(Mode::Insert(replace(self, Insertstate { mode: InsertMode::Insert })))
+        Ok(Mode::Insert(mode))
     }
 }
 
