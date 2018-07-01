@@ -51,7 +51,6 @@ macro_rules! check {
  *  - PERF add clear in sub rec to framebuffer and use Draw in Drawinfo to redraw only what's needed
  *  - Drawinfo: replace 'buffer' and 'buffer_offset' with iterator of &[u8]
  *  - Line/Range: implement iterator
- *  - use split iterator for the file loader ?
  *  - need to implement char/line next/previous
  *  - BUG: double check Buffer::delete
  *  - BUG: why is there an empty last line at the end !!
@@ -854,16 +853,6 @@ pub fn copyn<T>(dst: &mut [T], src: &[T], n: usize) where T : Copy {
     dst[..n].clone_from_slice(&src[..n])
 }
 
-// CLEANUP: replace with std memchr when this make it into stable
-pub fn memchr(c: u8, s: &[u8]) -> Option<usize> {
-    for (i, &x) in s.iter().enumerate() {
-        if x == c {
-            return Some(i)
-        }
-    }
-    None
-}
-
 pub fn clamp<'a, T>(s: &'a[T], l: usize) -> &'a[T] {
     &s[..min(l, s.len())]
 }
@@ -1428,47 +1417,25 @@ pub struct Buffer {
 impl Buffer {
     pub fn from_file(path: &str) -> Re<Buffer> {
         let text = file_load(path)?;
-
         Ok(Buffer::from_text(text))
     }
 
     fn from_text(text: Vec<u8>) -> Buffer {
-
         let mut lines = Vec::new();
         let mut line_indexes = Vec::new();
 
-        {
-            // TODO: try using split iterator
-            //for (i, line) in buf.split(|c| *c == newline).enumerate() {
-            //    println!("{}: {}", i, str::from_utf8(line).unwrap())
-            //}
-
-            let l = text.len();
-            let mut a = 0;
-            while a < l {
-                let b = match memchr('\n' as u8, &text[a..]) {
-                    Some(o) => a + o,
-                    None    => l,
-                };
-                lines.push(range(a, b));
-                a = b + 1; // skip the '\n'
-
-//                if lines.len() == 40 {
-//                    break;
-//                }
+        let mut a = 0;
+        let newline = '\n' as u8;
+        for (i, line) in text.split(|c| *c == newline).enumerate() {
+            let l = line.len();
+            let b = a + l;
+            let mut r = range(a, b);
+            a = b + 1;
+            if l > 1 && line[l - 2] == '\r' as u8 {
+                r.stop -= 1;
             }
-        }
-
-        for i in 0..lines.len() {
+            lines.push(r);
             line_indexes.push(i);
-        }
-
-        // HACK: just temporary until I had cursor position to append and have proper insert mode !
-        //       this is necessary to start a newline for appending chars, until command -> insert
-        //       mode transation does this properly.
-        {
-            line_indexes.push(lines.len());
-            lines.push(range(text.len(), text.len()));
         }
 
         Buffer {
