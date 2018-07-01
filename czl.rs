@@ -49,7 +49,6 @@ macro_rules! check {
  *
  * TODOs and cleanups
  *  - PERF add clear in sub rec to framebuffer and use Draw in Drawinfo to redraw only what's needed
- *  - Drawinfo: replace 'buffer' and 'buffer_offset' with iterator of &[u8]
  *  - Line/Range: implement iterator
  *  - need to implement char/line next/previous
  *  - BUG: double check Buffer::delete
@@ -470,6 +469,7 @@ mod core {
 use fmt;
 use std;
 use std::ops::Add;
+use std::ops::AddAssign;
 use std::ops::Neg;
 use std::ops::Sub;
 
@@ -647,6 +647,13 @@ impl Add<Pos> for Pos {
 
     fn add(self, v: Pos) -> Pos {
         pos(self.x + v.x, self.y + v.y)
+    }
+}
+
+impl AddAssign<Pos> for Pos {
+    fn add_assign(&mut self, v: Pos) {
+        self.x += v.x;
+        self.y += v.y;
     }
 }
 
@@ -1225,13 +1232,8 @@ impl Screen {
         // buffer content
         {
             let y_stop = min(self.textarea.h(), drawinfo.buffer.nlines() - file_base_offset.y);
-            for i in 0..y_stop {
-                let lineoffset = pos(0, i);
-                let file_offset = file_base_offset + lineoffset;
-                let frame_offset = frame_base_offset + lineoffset;
-
-                let mut line = drawinfo.buffer.line_get_slice(file_offset);
-                line = clamp(line, self.textarea.w() as usize);
+            for (i, line) in drawinfo.buffer.iter(drawinfo.buffer_offset, y_stop).enumerate() {
+                let frame_offset = frame_base_offset + pos(0, i32(i));
                 framebuffer.put_line(frame_offset, line);
             }
         }
@@ -1284,6 +1286,7 @@ pub struct Drawinfo<'a> {
 mod text {
 
 
+use std::cmp::min;
 use std::fs;
 use std::io::Read;
 use std::io::Write;
@@ -1413,8 +1416,44 @@ pub struct Buffer {
     pub dirty:              bool,
 }
 
+pub struct BufferIter<'a> {
+    buffer: &'a Buffer,
+    offset: Pos,
+    nlines: i32,
+}
+
+impl <'a> Iterator for BufferIter<'a> {
+    type Item = &'a[u8];
+
+    fn next(&mut self) -> Option<&'a[u8]> {
+        if self.nlines < 1 {
+            return None
+        }
+
+        let offset = self.offset;
+        self.nlines -= 1;
+        self.offset += pos(0,1);
+
+        Some(self.buffer.line_get_slice(offset))
+    }
+}
+
 // TODO: this should implement array bracket notation ?
 impl Buffer {
+
+    pub fn iter(&self, offset: Pos, want_nlines: i32) -> BufferIter {
+        let nlines = min(want_nlines, self.nlines() - offset.y);
+        BufferIter {
+            buffer: self,
+            offset,
+            nlines,
+        }
+    }
+
+    pub fn iter_all(&self) -> BufferIter {
+        self.iter(pos(0,0), self.nlines())
+    }
+
     pub fn from_file(path: &str) -> Re<Buffer> {
         let text = file_load(path)?;
         Ok(Buffer::from_text(text))
@@ -1448,10 +1487,11 @@ impl Buffer {
 
     pub fn to_file(&mut self, path: &str) -> Re<()> {
         let mut f = fs::File::create(path)?;
-
-        for i in 0..self.nlines() {
-            f.write_all(self.line_get_slice(pos(0,i)))?;
-            f.write_all(LINE_ENDING)?;
+        let mut line_ending : &[u8] = &vec!();
+        for line in self.iter_all() {
+            f.write_all(line_ending)?;
+            f.write_all(line)?;
+            line_ending = LINE_ENDING;
         }
 
         self.dirty = false;
@@ -1499,9 +1539,9 @@ impl Buffer {
         self.textbuffer.lines[line_idx] = range;
     }
 
-    pub fn line_get_slice<'a>(&'a self, offset: Pos) -> &'a[u8] {
-        let x = offset.x as usize;
-        let y = offset.y as usize;
+    fn line_get_slice<'a>(&'a self, offset: Pos) -> &'a[u8] {
+        let x = usize(offset.x);
+        let y = usize(offset.y);
         let line = self.line_get(y).to_slice();
         shift(line, x)
     }
@@ -1510,13 +1550,13 @@ impl Buffer {
         check!(y < self.line_indexes.len());
         self.line_indexes.remove(y);
 
-        // TODO: update all other views of that file whose cursors is below lineno
+        // FUTURE: update all other views of that file whose cursors is below lineno
     }
 
     pub fn line_new(&mut self, lineno: usize) {
         self.line_indexes.insert(lineno, self.textbuffer.emptyline());
 
-        // TODO: update all other views of that file whose cursors is below lineno
+        // FUTURE: update all other views of that file whose cursors is below lineno
     }
 
     pub fn line_break(&mut self, lineno: usize, colno: usize) {
@@ -1528,7 +1568,7 @@ impl Buffer {
         self.textbuffer.lines[left_idx]  = left;
         self.textbuffer.lines[right_idx] = right;
 
-        // TODO: update all other views of that file whose cursors is below lineno
+        // FUTURE: update all other views of that file whose cursors is below lineno
     }
 
     // CHECK: from/to should be inclusive
