@@ -48,8 +48,6 @@ macro_rules! check {
  *  - ctags support
  *
  * TODOs and cleanups
- *  - use Vec.insert instead in Text::insert and Text::replace
- *  - nothing should directly use Framebuffer, instead always use a Screen !
  *  - PERF add clear in sub rec to framebuffer and use Draw in Drawinfo to redraw only what's needed
  *  - Drawinfo: replace 'buffer' and 'buffer_offset' with iterator of &[u8]
  *  - Line/Range: implement iterator
@@ -100,7 +98,7 @@ pub const CONF : Config = Config {
     color_footer:           Colorcell { fg: Color::White,   bg: Color::Gray(14) },
     color_lineno:           Colorcell { fg: Color::Green,   bg: Color::White },
     color_console:          Colorcell { fg: Color::White,   bg: Color::Gray(12) },
-    color_cursor_lines:     Colorcell { fg: Color::Black,   bg: Color::Gray(16) },
+    color_cursor_lines:     Colorcell { fg: Color::Black,   bg: Color::Gray(15) },
 
     color_mode_command:     Colorcell { fg: Color::BoldWhite, bg: Color::Black },
     color_mode_insert:      Colorcell { fg: Color::BoldWhite, bg: Color::Red },
@@ -148,18 +146,14 @@ pub struct Config {
 /* CORE TYPE DEFINITION */
 
 // The core editor structure
+// TODO: add open buffer list, open views, open screens
 struct Editor {
-    window:         Pos,              // The dimensions of the editor and backend terminal window
-    mainscreen:     Rec,              // The screen area for displaying file content and menus.
+    window:         Pos,        // The dimensions of the editor and backend terminal window
+    mainscreen:     Rec,        // The screen area for displaying file content and menus.
     footer:         Rec,
-    framebuffer:    Framebuffer,
-    // For the time being, only one file can be loaded and edited per program.
-    // TODO:
-    //  list of open files and their buffers
-    //  list of screens and views on top of buffers
-    //  current screen layout
-    buffer: Buffer,
-    view:   View,
+    buffer:         Buffer,     // The one file loaded in the editor
+    view:           View,       // The one view of the one file loaded
+    screen:         Screen,     // The one screen associated to the one file loaded
 }
 
 #[derive(Debug)]
@@ -298,7 +292,8 @@ impl Mode {
             Key(CTRL_H)   => FileStart,
             Key(CTRL_L)   => FileEnd,
             // TODO: Consider changing to Mut(LineOp, cursor) for something more systematic ?
-            Key('o')    => LineNew(e.view.cursor),
+            Key('o')    => LineNew(e.view.cursor + pos(0, 1)),
+            Key('O')    => LineNew(e.view.cursor),
             //Key('O')    => LineNew(e.view.cursor), // Implement with multi command !
             Key(ENTER)  => LineBreak(e.view.cursor),
             Key('d')    => LineDel(e.view.cursor),
@@ -352,7 +347,6 @@ enum CommandOp {
     Noop,
 }
 
-// CLEANUP: do I need Pos here ? Or is it implicitly wrt to the cursor of a the given view ?
 enum InsertOp {
     LineBreak(Pos),
     CharInsert(Pos, char),
@@ -982,13 +976,12 @@ use term::*;
 use text::Buffer;
 
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Draw {
-    Nothing,
-    All,
-    Header,
-    Text,
+    Nothing,            // nothing to redraw
+    Header,             // only redraw header
+    All,                // redraw all text and header
 }
-
 
 // The struct that manages compositing.
 pub struct Framebuffer {
@@ -1220,14 +1213,24 @@ impl Screen {
         }
     }
 
-    pub fn draw(&self, framebuffer: &mut Framebuffer, drawinfo: &Drawinfo) {
+    pub fn put_text(&self, framebuffer: &mut Framebuffer, drawinfo: &Drawinfo) {
         let file_base_offset = drawinfo.buffer_offset;
         let frame_base_offset = self.textarea.min;
+
+        if drawinfo.draw == Draw::Nothing {
+            return
+        }
 
         // header
         {
             framebuffer.put_line(self.header.min, drawinfo.header.as_bytes());
             framebuffer.put_color(self.header, CONF.color_header_active);
+        }
+
+        // FUTURE: this will need to be skipped for an inactive view sharing a buffer if the active
+        // view has pushed a change show that this inactive view should update its cursor.
+        if drawinfo.draw == Draw::Header {
+            return
         }
 
         // buffer content
@@ -1544,14 +1547,7 @@ impl Buffer {
     }
 
     pub fn line_new(&mut self, lineno: usize) {
-        let lastline = self.line_indexes.len() - 1;
-        self.line_indexes.reserve(1);
-// CLEANUP: use Vec.insert
-        for i in (lineno..lastline).rev() {
-            self.line_indexes[i+1] = self.line_indexes[i];
-        }
-
-        self.line_indexes[lineno] = self.textbuffer.emptyline();
+        self.line_indexes.insert(lineno, self.textbuffer.emptyline());
 
         // TODO: update all other views of that file whose cursors is below lineno
     }
@@ -1713,10 +1709,11 @@ impl Commandstate {
                 }
             }
 
-            LineNew(pos) => {
-                let lineno = usize(pos.y);
+            LineNew(p) => {
+                let lineno = usize(p.y);
                 e.buffer.snapshot(e.view.cursor);
                 e.buffer.line_new(lineno);
+                e.view.cursor = pos(0, p.y);
             }
 
             LineBreak(Pos { x, y }) => {
@@ -1794,7 +1791,6 @@ impl Insertstate {
             Noop => (),
         }
 
-        // TODO: can I  just return something new and dorp self here ???
         Ok(Mode::Insert(mode))
     }
 }
@@ -1806,8 +1802,8 @@ impl Editor {
         let buffer = Buffer::from_file(&filename)?;
 
         let window = Term::size();
-        let framebuffer = Framebuffer::mk_framebuffer(window);
         let (mainscreen, footer) = window.rec().vsplit(window.y - 1);
+        let screen = Screen::mk_screen(mainscreen);
         let view;
         {
             // reuse code in mk_Screen !!!
@@ -1820,17 +1816,18 @@ impl Editor {
             window,
             mainscreen,
             footer,
-            framebuffer,
             buffer,
             view,
+            screen,
         })
     }
 
     fn run() -> Re<()> {
         let mut e = Editor::mk_editor()?;
+        let mut f = Framebuffer::mk_framebuffer(e.window);
         let mut m = Mode::default_command_state;
 
-        e.refresh_screen(&m)?;
+        e.refresh_screen(&mut f, &m)?;
 
         let (send, recv) = mpsc::sync_channel(32);
 
@@ -1847,14 +1844,13 @@ impl Editor {
 
             m = Mode::process_input(m, i, &mut e)?;
 
-            // CLEANUP: extract Framebuffer from screen and do framebuffer:refresh(&e, &m):
-            e.refresh_screen(&m)?;
+            e.refresh_screen(&mut f, &m)?;
         }
 
         Ok(())
     }
 
-    fn refresh_screen(&mut self, mode: &Mode) -> Re<()> {
+    fn refresh_screen(&mut self, framebuffer: &mut Framebuffer, mode: &Mode) -> Re<()> {
         // main screen
         {
             let draw_time = Scopeclock::measure("draw");
@@ -1872,24 +1868,23 @@ impl Editor {
                 relative_lineno:    self.view.relative_lineno,
                 is_active:          self.view.is_active,
             };
-            let screen = Screen::mk_screen(self.mainscreen); //TODO: persist in Editor
-            screen.draw(&mut self.framebuffer, &drawinfo);
+            self.screen.put_text(framebuffer, &drawinfo);
         }
 
         // footer
         {
-            self.framebuffer.put_line(self.footer.min + pos(1,0), mode.name().as_bytes());
-            self.framebuffer.put_line(self.footer.min + pos(10, 0), b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
-            self.framebuffer.put_color(self.footer, mode.footer_color());
+            framebuffer.put_line(self.footer.min + pos(1,0), mode.name().as_bytes());
+            framebuffer.put_line(self.footer.min + pos(10, 0), b"FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER FOOTER");
+            framebuffer.put_color(self.footer, mode.footer_color());
         }
 
         // renter frame to terminal
         {
             let push_frame_time = Scopeclock::measure("render");
 
-            self.framebuffer.render()?;
+            framebuffer.render()?;
             if !CONF.retain_frame {
-                self.framebuffer.clear();
+                framebuffer.clear();
             }
         }
 
