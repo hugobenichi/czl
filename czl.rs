@@ -34,12 +34,13 @@ macro_rules! check {
 
 
 /*
+ * WIP: migrate text snapshot to command list
+ *
  * Features:
  *  - delete and backspace in command mode
  *  - offer to save if panic
  *  - better navigation !
  *  - copy and yank buffer
- *  - redo
  *  - cursor horizontal memory
  *  - buffer explorer
  *  - directory explorer
@@ -52,8 +53,6 @@ macro_rules! check {
  *  - Line/Range: implement iterator
  *  - need to implement char/line next/previous
  *  - BUG: double check Buffer::delete
- *  - BUG: why is there an empty last line at the end !!
- *  - migrate text snapshot to command list
  *  - fuzzer
  *  - handle resize
  *  - utf8 support: Range and Filebuffer, Input, ... don't wait too much
@@ -285,10 +284,10 @@ impl Mode {
             Key('k')    => Movement(Move::Up),
             Key('l')    => Movement(Move::Right),
             Key(' ')    => Recenter,
-            Key(CTRL_D)   => PageDown,
-            Key(CTRL_U)   => PageUp,
-            Key(CTRL_H)   => FileStart,
-            Key(CTRL_L)   => FileEnd,
+            Key(CTRL_D) => PageDown,
+            Key(CTRL_U) => PageUp,
+            Key(CTRL_H) => FileStart,
+            Key(CTRL_L) => FileEnd,
             // TODO: Consider changing to Mut(LineOp, cursor) for something more systematic ?
             Key('o')    => LineNew(e.view.cursor + pos(0, 1)),
             Key('O')    => LineNew(e.view.cursor),
@@ -296,9 +295,9 @@ impl Mode {
             Key(ENTER)  => LineBreak(e.view.cursor),
             Key('d')    => LineDel(e.view.cursor),
             Key('u')    => Undo,
-            Key('U')    => Redo,
+            Key('r')    => Redo,
             Key('\t')   => SwitchInsert,
-            Key('r')    => SwitchReplace,
+            Key(CTRL_R) => SwitchReplace,
             Key('s')    => Save(format!("{}.tmp", e.view.filepath)),
             Key('\\')   => ClearConsole,
             Key('b')
@@ -1401,19 +1400,18 @@ impl Text {
 }
 
 
-#[derive(Clone)] // Do I need clone ??
-struct Textsnapshot {
-    line_indexes:   Vec<usize>, // the actual lines in the current files, as indexes into 'lines'
-    dirty:          bool,
-    cursor:         Pos,
-}
-
 // Manage content of a file
 pub struct Buffer {
+    // CLEANUP: unfold textbuffer in here directly
     textbuffer:             Text,
-    previous_snapshots:     Vec<Textsnapshot>,
     line_indexes:           Vec<usize>,
     pub dirty:              bool,
+
+    snapshots:              Vec<Snapshot>,
+    snapshot_next:          usize,
+    // CLEANUP: should this be group together ?
+    op_history:             Vec<Op>,
+    op_cursor:              usize,
 }
 
 pub struct BufferIter<'a> {
@@ -1479,9 +1477,12 @@ impl Buffer {
 
         Buffer {
             textbuffer:         Text { text, lines },
-            previous_snapshots: Vec::new(),
             line_indexes,
             dirty:              false,
+            snapshots:          Vec::new(),
+            snapshot_next:      0,
+            op_history:         Vec::new(),
+            op_cursor:          0,
         }
     }
 
@@ -1500,9 +1501,15 @@ impl Buffer {
     }
 
     pub fn snapshot(&mut self, cursor: Pos) {
-        let line_indexes = self.line_indexes.clone();
-        let dirty = self.dirty;
-        self.previous_snapshots.push(Textsnapshot { line_indexes, dirty, cursor });
+        let s = Snapshot {
+            text_cursor:    self.textbuffer.text.len(),
+            line_cursor:    self.textbuffer.lines.len(),
+            op_cursor:      self.op_cursor,
+            dirty:          self.dirty,
+            cursor:         cursor,
+        };
+        self.snapshots.push(s);
+        self.snapshot_next += 1;
         self.dirty = true;
     }
 
@@ -1629,14 +1636,41 @@ impl Buffer {
     }
 
     pub fn undo(&mut self) -> Option<Pos> {
-        match self.previous_snapshots.pop() {
-            Some(sp) => {
-                self.line_indexes = sp.line_indexes;
-                self.dirty = sp.dirty;
-                Some(sp.cursor)
+        match self.snapshots.pop() {
+            Some(s) => {
+                for i in (s.op_cursor..self.op_cursor).rev() {
+                    let mut op = self.op_history[i];
+                    op.undo_op(self);
+                }
+                self.op_cursor = s.op_cursor;
+                // TODO: introduce text cursor and adjust it here
+                // TODO: introduce line cursor and adjust it here
+                self.dirty = s.dirty;
+                Some(s.cursor)
             }
             None => None,
         }
+    }
+
+    pub fn redo(&mut self) -> Option<Pos> {
+        if self.snapshot_next == self.snapshots.len() {
+            return None
+        }
+
+        let s = self.snapshots[self.snapshot_next];
+
+        for i in self.op_cursor..s.op_cursor {
+            let mut op = self.op_history[i];
+            op.do_op(self);
+        }
+
+        // TODO adjust text and line cursors
+
+        self.dirty = s.dirty;
+        self.snapshot_next += 1;
+        self.op_cursor = s.op_cursor;
+
+        Some(s.cursor)
     }
 
     pub fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) {
@@ -1681,7 +1715,70 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
 }
 
 
+/*
+ * Undo management and operation management
+ *  - store all operations as objects in to an append only vec
+ *  - snapshot are another type of operation
+ *  - store sufficient information for undo and redo
+ *  - when undoing, I can truncate the line buffer and the text buffer
+ */
+
+#[derive(Debug, Copy, Clone)]
+struct Snapshot {
+    text_cursor:    usize,
+    line_cursor:    usize,
+    op_cursor:      usize,
+    dirty:          bool,
+    cursor:         Pos,
+}
+
+// A line operation on the buffer
+#[derive(Debug, Copy, Clone)]
+struct Op {
+    line_index:     usize,
+    line_position:  usize,
+    op_type:        Optype,
+}
+
+#[derive(Debug, Copy, Clone)]
+enum Optype {
+    Del,
+    Ins,
+    Rep,
+}
+
+impl Op {
+    fn do_op(&mut self, buffer: &mut Buffer) {
+        match self.op_type {
+            Optype::Del => self.line_position = buffer.line_indexes.remove(self.line_index),
+            Optype::Ins => buffer.line_indexes.insert(self.line_index, self.line_position),
+            Optype::Rep => self.do_replace(buffer),
+        }
+    }
+
+    fn undo_op(&mut self, buffer: &mut Buffer) {
+        match self.op_type {
+            Optype::Del => buffer.line_indexes.insert(self.line_index, self.line_position),
+            Optype::Ins => { buffer.line_indexes.remove(self.line_index); }
+            Optype::Rep => self.do_replace(buffer),
+        };
+    }
+
+    fn do_replace(&mut self, buffer: &mut Buffer) {
+// try this alternative
+//        use std;
+//        self.line_position =
+//            std::mem::replace(&mut buffer.line_indexes[self.line_index], self.line_position);
+        let old_idx = buffer.line_indexes[self.line_index];
+        buffer.line_indexes[self.line_index] = self.line_position;
+        self.line_position = old_idx;
+    }
+
+}
+
+
 } // mod text
+
 
 
 /* COMMAND AND BUFFER MANIPULATION */
@@ -1735,10 +1832,15 @@ impl Commandstate {
                 match e.buffer.undo() {
                     Some(p) => e.view.cursor = p,
                     None => (),
-                };
+                }
             }
 
-            Redo => (), // TODO: implement redo stack
+            Redo => {
+                match e.buffer.redo() {
+                    Some(p) => e.view.cursor = p,
+                    None => (),
+                }
+            }
 
             Save(path) => e.buffer.to_file(&path)?,
 
