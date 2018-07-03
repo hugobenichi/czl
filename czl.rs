@@ -34,10 +34,14 @@ macro_rules! check {
 
 
 /*
- * WIP: migrate text snapshot to command list
+ * Buffer operation migration
+ *  - finish migrating Buffer::delete to text::Op
+ *  - add text and line cursor
+ *  - double check Buffer::delete
+ *  - delete and backspace in command mode
+ *  - debug redo() and make sure undo/redo works
  *
  * Features:
- *  - delete and backspace in command mode
  *  - offer to save if panic
  *  - better navigation !
  *  - copy and yank buffer
@@ -52,7 +56,6 @@ macro_rules! check {
  *  - PERF add clear in sub rec to framebuffer and use Draw in Drawinfo to redraw only what's needed
  *  - Line/Range: implement iterator
  *  - need to implement char/line next/previous
- *  - BUG: double check Buffer::delete
  *  - fuzzer
  *  - handle resize
  *  - utf8 support: Range and Filebuffer, Input, ... don't wait too much
@@ -259,6 +262,7 @@ impl Mode {
 
             PendingInsert(mode) => {
                 e.buffer.snapshot(e.view.cursor);
+                e.buffer.prepare_insert(usize(e.view.cursor.y));
                 let insertmode = Insert(mode);
                 Mode::process_input(insertmode, i, e)?
             }
@@ -267,6 +271,8 @@ impl Mode {
                 panic!("cannot process input in Exit state")
             }
         };
+
+        // FUTURE: if the cursor moved position, update all other views of that file whose cursors is below lineno
 
         // TODO: instead of aborting, handle input error processing, and check if any dirty files
         // need saving !
@@ -1376,9 +1382,14 @@ impl Text {
         }
     }
 
-    fn emptyline(&mut self) -> usize {
-        self.lines.push(range(self.text.len(), self.text.len()));
+    fn push_line(&mut self, r: Range) -> usize {
+        self.lines.push(r);
         self.lines.len() - 1
+    }
+
+    fn emptyline(&mut self) -> usize {
+        let r = range(self.text.len(), self.text.len());
+        self.push_line(r)
     }
 
     fn copyline(&mut self, line_idx: usize) -> usize {
@@ -1555,27 +1566,55 @@ impl Buffer {
 
     pub fn line_del(&mut self, y: usize) {
         check!(y < self.line_indexes.len());
-        self.line_indexes.remove(y);
 
-        // FUTURE: update all other views of that file whose cursors is below lineno
+        self.do_op(Op {
+            line_index:     y,
+            line_position:  0,
+            op_type:        Optype::Del,
+        });
     }
 
     pub fn line_new(&mut self, lineno: usize) {
-        self.line_indexes.insert(lineno, self.textbuffer.emptyline());
-
-        // FUTURE: update all other views of that file whose cursors is below lineno
+        let line_position = self.textbuffer.emptyline();
+        self.do_op(Op {
+            line_index:     lineno,
+            line_position:  line_position,
+            op_type:        Optype::Ins,
+        });
     }
 
     pub fn line_break(&mut self, lineno: usize, colno: usize) {
         let (left, right) = self.line_get(lineno).cut(colno);
+        let left_idx = self.textbuffer.push_line(left);
+        let right_idx = self.textbuffer.push_line(right);
 
-        self.line_new(lineno);
-        let left_idx = self.line_index(lineno);
-        let right_idx = self.line_index(lineno + 1);
-        self.textbuffer.lines[left_idx]  = left;
-        self.textbuffer.lines[right_idx] = right;
+        self.do_op(Op {
+            line_index:     lineno,
+            line_position:  left_idx,
+            op_type:        Optype::Rep,
+        });
+        self.do_op(Op {
+            line_index:     lineno + 1,
+            line_position:  right_idx,
+            op_type:        Optype::Ins,
+        });
+    }
 
-        // FUTURE: update all other views of that file whose cursors is below lineno
+    pub fn prepare_insert(&mut self, lineno: usize) {
+        let line_idx = self.line_index(lineno);
+        let newline_idx = self.textbuffer.copyline(line_idx);
+        self.do_op(Op {
+            line_index:     lineno,
+            line_position:  newline_idx,
+            op_type:        Optype::Rep,
+        });
+    }
+
+    pub fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) {
+        match mode {
+            InsertMode::Insert  => self.textbuffer.insert(colno, c),
+            InsertMode::Replace => self.textbuffer.replace(colno, c),
+        }
     }
 
     // CHECK: from/to should be inclusive
@@ -1673,21 +1712,10 @@ impl Buffer {
         Some(s.cursor)
     }
 
-    pub fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) {
-        // prepare buffer for insertion: modified line must be copied.
-        // BUG: this probably needs to be only done on the first PendingInsert thing
-        // actually !
-        let last_idx = self.textbuffer.lines.len() - 1;
-        let line_idx = self.line_index(lineno);
-        if line_idx != last_idx {
-            let newline_idx = self.textbuffer.copyline(line_idx);
-            self.line_indexes[lineno] = newline_idx;
-        }
-
-        match mode {
-            InsertMode::Insert  => self.textbuffer.insert(colno, c),
-            InsertMode::Replace => self.textbuffer.replace(colno, c),
-        }
+    fn do_op(&mut self, mut op: Op) {
+        op.do_op(self);
+        self.op_history.insert(self.op_cursor, op);
+        self.op_cursor += 1;
     }
 }
 
@@ -1893,6 +1921,8 @@ impl Insertstate {
                     e.view.cursor = newpos;
                 }
             }
+
+            // TODO: add SwitchReplace / SwitchInsert
 
             SwitchCommand =>
                 return Ok(Mode::default_command_state),
