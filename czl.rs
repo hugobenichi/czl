@@ -35,10 +35,12 @@ macro_rules! check {
 
 /*
  * Buffer operation migration
- *  - finish migrating Buffer::delete to text::Op
- *  - add text and line cursor
+ *  - implement JoinLine for command mode and delete one char
  *  - double check Buffer::delete
+ *          some issues when jumping to next line / previous line
+ *  - add text and line cursor
  *  - delete and backspace in command mode
+ *  - migrate delete_range to Op
  *  - debug redo() and make sure undo/redo works
  *
  * Features:
@@ -330,6 +332,7 @@ impl Mode {
 
 
 
+// TODO: CommandOp and InsertOp should actually be merged ??
 // TODO: split into movement ops, buffer ops, + misc
 enum CommandOp {
     Movement(Move),
@@ -396,24 +399,52 @@ impl View {
         }
     }
 
+// CLEANUP: move to Cursor impl
+    fn cursor_adjust(buffer: &Buffer, mut p: Pos) -> Pos {
+        p.y = min(p.y, buffer.nlines() - 1);
+        p.y = max(0, p.y);
+
+        // Right bound clamp pushes x to -1 for empty lines.
+        p.x = min(p.x, i32(buffer.line_len(usize(p.y))) - 1);
+        p.x = max(0, p.x);
+
+        p
+    }
+
+    // CHECKME: for cursor_next/prev, do I need to skip empty lines ?
+
+    fn cursor_next(buffer: &Buffer, p: Pos) -> Pos {
+        if p.x < i32(buffer.line_len(usize(p.y))) - 1 {
+            return p + pos(1,0)
+        }
+
+        if p.y < buffer.nlines() - 1 {
+            return pos(0, p.y + 1)
+        }
+
+        p // Hit end of file
+    }
+
+    fn cursor_prev(buffer: &Buffer, p: Pos) -> Pos {
+        if p.x > 0 {
+            return p - pos(1,0)
+        }
+
+        if p.y > 0 {
+            let y = p.y - 1;
+            let x = max(0, i32(buffer.line_len(usize(y))) - 1);
+            return pos(x, y)
+        }
+
+        p // Hit beggining of file
+    }
+
     fn update(&mut self, buffer: &Buffer) {
         if buffer.nlines() == 0 {
             return;
         }
 
-        // Cursor adjustment
-        {
-            let mut p = self.cursor;
-
-            p.y = min(p.y, buffer.nlines() - 1);
-            p.y = max(0, p.y);
-
-            // Right bound clamp pushes x to -1 for empty lines.
-            p.x = min(p.x, i32(buffer.line_len(usize(p.y))) - 1);
-            p.x = max(0, p.x);
-
-            self.cursor = p;
-        }
+        self.cursor = View::cursor_adjust(buffer, self.cursor);
 
         // text range adjustment
         {
@@ -1362,6 +1393,17 @@ struct Text {
 }
 
 impl Text {
+    fn line_get(&self, line_idx: usize) -> Line {
+        Line {
+            range: self.lines[line_idx],
+            text: &self.text,
+        }
+    }
+
+    fn last_line_index(&self) -> usize {
+        self.lines.len() - 1
+    }
+
     fn append(&mut self, c: char) {
         self.text.push(c as u8);
         self.lines.last_mut().unwrap().stop += 1;
@@ -1384,7 +1426,7 @@ impl Text {
 
     fn push_line(&mut self, r: Range) -> usize {
         self.lines.push(r);
-        self.lines.len() - 1
+        self.last_line_index()
     }
 
     fn emptyline(&mut self) -> usize {
@@ -1392,7 +1434,7 @@ impl Text {
         self.push_line(r)
     }
 
-    fn copyline(&mut self, line_idx: usize) -> usize {
+    fn cloneline(&mut self, line_idx: usize) -> usize {
         let src = self.lines[line_idx];
         let dststart = self.text.len();
         let dststop = dststart + src.len();
@@ -1406,7 +1448,7 @@ impl Text {
         }
 
         self.lines.push(dst);
-        self.lines.len() - 1
+        self.last_line_index()
     }
 }
 
@@ -1546,10 +1588,7 @@ impl Buffer {
     }
 
     fn line_get(&self, lineno: usize) -> Line {
-        Line {
-            range: self.textbuffer.lines[self.line_index(lineno)],
-            text: &self.textbuffer.text,
-        }
+        self.textbuffer.line_get(self.line_index(lineno))
     }
 
     fn line_set(&mut self, lineno: usize, range: Range) {
@@ -1602,7 +1641,7 @@ impl Buffer {
 
     pub fn prepare_insert(&mut self, lineno: usize) {
         let line_idx = self.line_index(lineno);
-        let newline_idx = self.textbuffer.copyline(line_idx);
+        let newline_idx = self.textbuffer.cloneline(line_idx);
         self.do_op(Op {
             line_index:     lineno,
             line_position:  newline_idx,
@@ -1611,6 +1650,8 @@ impl Buffer {
     }
 
     pub fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) {
+        // Raw text mutation: insert is always preceded by a snapshot
+        // and appropriate line copy
         match mode {
             InsertMode::Insert  => self.textbuffer.insert(colno, c),
             InsertMode::Replace => self.textbuffer.replace(colno, c),
@@ -1618,7 +1659,7 @@ impl Buffer {
     }
 
     // CHECK: from/to should be inclusive
-    pub fn delete(&mut self, from: Pos, to: Pos) {
+    pub fn delete_range(&mut self, from: Pos, to: Pos) {
         let mut y_start = usize(from.y);
         let mut y_stop = usize(to.y);
 
@@ -1909,17 +1950,24 @@ impl Insertstate {
             }
 
             Delete(p) => {
-                // BUG: this should use char next instead, for handling end of line
-                e.buffer.delete(p, p + pos(1,0))
+                let q = View::cursor_next(&e.buffer, p);
+                e.buffer.delete_range(p, q);
+
+                // if we deleted the last char:
+                //   we need to join the next line into the current line
+                //   do that by implementing a join line comment
             }
 
             Backspace(p) => {
-                // BUG: this should use char previous instead, for handling start of line
-                if p.x > 0 {
-                    let newpos = p - pos(1,0);
-                    e.buffer.delete(newpos, p);
-                    e.view.cursor = newpos;
-                }
+                let q = View::cursor_prev(&e.buffer, p);
+                e.buffer.delete_range(q, p);
+                e.view.cursor = q;
+
+                // if we deleted the first char:
+                //   we need to
+                //      move up one line,
+                //      join the up line with the current line
+                //   => how to translate this into Ops ?
             }
 
             // TODO: add SwitchReplace / SwitchInsert
