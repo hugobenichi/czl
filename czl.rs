@@ -35,11 +35,15 @@ macro_rules! check {
 
 /*
  * Buffer operation migration
- *  - implement JoinLine for command mode and delete one char
+ *  - composite ops
+ *      join range,
+ *      delete range,
+ *      cut line section
+ *          => delete and backspace in command mode
+ *      replace line section,
+ *  - implement join line for delete char in insert mode
  *  - double check Buffer::delete
  *          some issues when jumping to next line / previous line
- *  - delete and backspace in command mode
- *  - migrate delete_range to Op
  *  - debug redo() and make sure undo/redo works
  *
  * Features:
@@ -298,7 +302,7 @@ impl Mode {
             // TODO: Consider changing to Mut(LineOp, cursor) for something more systematic ?
             Key('o')    => LineNew(e.view.cursor + pos(0, 1)),
             Key('O')    => LineNew(e.view.cursor),
-            //Key('O')    => LineNew(e.view.cursor), // Implement with multi command !
+            Key('q')    => LineJoin(e.view.cursor),
             Key(ENTER)  => LineBreak(e.view.cursor),
             Key('d')    => LineDel(e.view.cursor),
             Key('u')    => Undo,
@@ -342,6 +346,7 @@ enum CommandOp {
     FileEnd,
     LineDel(Pos),
     LineNew(Pos),
+    LineJoin(Pos),   // TODO join line with separator !
     LineBreak(Pos),
     Undo,
     Redo,
@@ -1551,6 +1556,24 @@ impl Buffer {
         self.do_op(op);
     }
 
+    pub fn line_join(&mut self, lineno: usize) {
+        let start = self.text.len();
+
+        let line1 = self.lines[lineno];
+        let line2 = self.lines[lineno + 1];
+        self.text_copy(line1);
+        self.text_copy(line2);
+
+        let line = range(start, start + line1.len() + line2.len());
+
+        self.do_op(Op {
+            lineno:     lineno,
+            line:       line,
+            op_type:    Optype::Rep,
+        });
+        self.line_del(lineno + 1);
+    }
+
     pub fn line_break(&mut self, lineno: usize, colno: usize) {
         let (left, right) = self.line_get(lineno).cut(colno);
 
@@ -1566,19 +1589,21 @@ impl Buffer {
         });
     }
 
-    fn cloneline(&mut self, lineno: usize) -> Range {
-        let src = self.lines[lineno];
-        let text_len = self.text.len();
-        let line_len = src.len();
-
-        self.text.reserve(line_len);
-        for i in src.start..src.stop {
+    fn text_copy(&mut self, r: Range) {
+        self.text.reserve(r.len());
+        for i in r.start..r.stop {
             // Isn't there a better option that this ?
             let c = self.text[i];
             self.text.push(c);
         }
+    }
 
-        range(text_len, text_len + line_len)
+    fn cloneline(&mut self, lineno: usize) -> Range {
+        let start = self.text.len();
+        let src = self.lines[lineno];
+        self.text_copy(src);
+
+        range(start, start + src.len())
     }
 
     pub fn prepare_insert(&mut self, lineno: usize) {
@@ -1823,6 +1848,11 @@ impl Commandstate {
                 e.buffer.snapshot(e.view.cursor);
                 e.buffer.line_new(lineno);
                 e.view.cursor = pos(0, p.y);
+            }
+
+            LineJoin(p) => {
+                e.buffer.snapshot(e.view.cursor);
+                e.buffer.line_join(usize(p.y));
             }
 
             LineBreak(Pos { x, y }) => {
