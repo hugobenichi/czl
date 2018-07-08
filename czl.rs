@@ -38,7 +38,6 @@ macro_rules! check {
  *  - implement JoinLine for command mode and delete one char
  *  - double check Buffer::delete
  *          some issues when jumping to next line / previous line
- *  - add text and line cursor
  *  - delete and backspace in command mode
  *  - migrate delete_range to Op
  *  - debug redo() and make sure undo/redo works
@@ -1326,7 +1325,7 @@ use std::cmp::min;
 use std::fs;
 use std::io::Read;
 use std::io::Write;
-use std::mem::replace;
+use std::mem::swap;
 
 use core::*;
 use util::*;
@@ -1387,77 +1386,10 @@ impl <'a> Line<'a> {
 }
 
 
-struct Text {
-    text:   Vec<u8>,    // original content of the file when loaded
-    lines:  Vec<Range>,  // subslices into the buffer or appendbuffer
-}
-
-impl Text {
-    fn line_get(&self, line_idx: usize) -> Line {
-        Line {
-            range: self.lines[line_idx],
-            text: &self.text,
-        }
-    }
-
-    fn last_line_index(&self) -> usize {
-        self.lines.len() - 1
-    }
-
-    fn append(&mut self, c: char) {
-        self.text.push(c as u8);
-        self.lines.last_mut().unwrap().stop += 1;
-    }
-
-    fn insert(&mut self, colno: usize, c: char) {
-        let line = self.lines.last_mut().unwrap();
-        line.stop += 1;
-        self.text.insert(line.start + colno, c as u8);
-    }
-
-    fn replace(&mut self, colno: usize, c: char) {
-        let line = *self.lines.last().unwrap();
-        if colno == line.len() {
-            self.append(c);
-        } else {
-            self.text[line.start + colno] = c as u8;
-        }
-    }
-
-    fn push_line(&mut self, r: Range) -> usize {
-        self.lines.push(r);
-        self.last_line_index()
-    }
-
-    fn emptyline(&mut self) -> usize {
-        let r = range(self.text.len(), self.text.len());
-        self.push_line(r)
-    }
-
-    fn cloneline(&mut self, line_idx: usize) -> usize {
-        let src = self.lines[line_idx];
-        let dststart = self.text.len();
-        let dststop = dststart + src.len();
-        let dst = range(dststart, dststop);
-
-        self.text.reserve(src.len());
-        for i in src.start..src.stop {
-            // This is so lame ;-( I want my memcpy
-            let c = self.text[i];
-            self.text.push(c);
-        }
-
-        self.lines.push(dst);
-        self.last_line_index()
-    }
-}
-
-
 // Manage content of a file
 pub struct Buffer {
-    // CLEANUP: unfold textbuffer in here directly
-    textbuffer:             Text,
-    line_indexes:           Vec<usize>,
+    text:                   Vec<u8>,
+    lines:                  Vec<Range>,
     pub dirty:              bool,
 
     snapshots:              Vec<Snapshot>,
@@ -1512,7 +1444,6 @@ impl Buffer {
 
     fn from_text(text: Vec<u8>) -> Buffer {
         let mut lines = Vec::new();
-        let mut line_indexes = Vec::new();
 
         let mut a = 0;
         let newline = '\n' as u8;
@@ -1525,12 +1456,11 @@ impl Buffer {
                 r.stop -= 1;
             }
             lines.push(r);
-            line_indexes.push(i);
         }
 
         Buffer {
-            textbuffer:         Text { text, lines },
-            line_indexes,
+            text,
+            lines,
             dirty:              false,
             snapshots:          Vec::new(),
             snapshot_next:      0,
@@ -1555,8 +1485,7 @@ impl Buffer {
 
     pub fn snapshot(&mut self, cursor: Pos) {
         let s = Snapshot {
-            text_cursor:    self.textbuffer.text.len(),
-            line_cursor:    self.textbuffer.lines.len(),
+            text_cursor:    self.text.len(),
             op_cursor:      self.op_cursor,
             dirty:          self.dirty,
             cursor:         cursor,
@@ -1567,33 +1496,32 @@ impl Buffer {
     }
 
     pub fn char_at(&self, lineno: usize, colno: usize) -> char {
+        // UTF8: need to iterate from line start
         self.line_get(lineno).char_at(colno)
     }
 
     pub fn nlines(&self) -> i32 {
-        i32(self.line_indexes.len())
+        i32(self.lines.len())
     }
 
-    pub fn last_line(&self) -> usize {
-        self.line_indexes.len() - 1
+    pub fn line_last(&self) -> usize {
+        self.lines.len() - 1
     }
 
-    pub fn line_len(&self, y: usize) -> usize {
-        let idx = self.line_indexes[y as usize];
-        self.textbuffer.lines[idx].len()
-    }
-
-    pub fn line_index(&self, lineno: usize) -> usize {
-        self.line_indexes[lineno]
+    pub fn line_len(&self, lineno: usize) -> usize {
+        // UTF8: count number of chars
+        self.lines[lineno].len()
     }
 
     fn line_get(&self, lineno: usize) -> Line {
-        self.textbuffer.line_get(self.line_index(lineno))
+        Line {
+            range: self.lines[lineno],
+            text: &self.text,
+        }
     }
 
     fn line_set(&mut self, lineno: usize, range: Range) {
-        let line_idx = self.line_index(lineno);
-        self.textbuffer.lines[line_idx] = range;
+        self.lines[lineno] = range;
     }
 
     fn line_get_slice<'a>(&'a self, offset: Pos) -> &'a[u8] {
@@ -1603,61 +1531,85 @@ impl Buffer {
         shift(line, x)
     }
 
-    pub fn line_del(&mut self, y: usize) {
-        check!(y < self.line_indexes.len());
+    pub fn line_del(&mut self, lineno: usize) {
+        check!(lineno < self.lines.len());
 
         self.do_op(Op {
-            line_index:     y,
-            line_position:  0,
+            lineno,
+            line:           Range { start: 0, stop: 0 },
             op_type:        Optype::Del,
         });
     }
 
+    fn line_empty(&mut self) -> Range {
+        range(self.text.len(), self.text.len())
+    }
+
     pub fn line_new(&mut self, lineno: usize) {
-        let line_position = self.textbuffer.emptyline();
-        self.do_op(Op {
-            line_index:     lineno,
-            line_position:  line_position,
-            op_type:        Optype::Ins,
-        });
+        let line = self.line_empty();
+        let op = Op { lineno, line, op_type:Optype::Ins };
+        self.do_op(op);
     }
 
     pub fn line_break(&mut self, lineno: usize, colno: usize) {
         let (left, right) = self.line_get(lineno).cut(colno);
-        let left_idx = self.textbuffer.push_line(left);
-        let right_idx = self.textbuffer.push_line(right);
 
         self.do_op(Op {
-            line_index:     lineno,
-            line_position:  left_idx,
-            op_type:        Optype::Rep,
+            lineno:     lineno,
+            line:       left,
+            op_type:    Optype::Rep,
         });
         self.do_op(Op {
-            line_index:     lineno + 1,
-            line_position:  right_idx,
-            op_type:        Optype::Ins,
+            lineno:     lineno + 1,
+            line:       right,
+            op_type:    Optype::Ins,
         });
     }
 
+    fn cloneline(&mut self, lineno: usize) -> Range {
+        let src = self.lines[lineno];
+        let text_len = self.text.len();
+        let line_len = src.len();
+
+        self.text.reserve(line_len);
+        for i in src.start..src.stop {
+            // Isn't there a better option that this ?
+            let c = self.text[i];
+            self.text.push(c);
+        }
+
+        range(text_len, text_len + line_len)
+    }
+
     pub fn prepare_insert(&mut self, lineno: usize) {
-        let line_idx = self.line_index(lineno);
-        let newline_idx = self.textbuffer.cloneline(line_idx);
-        self.do_op(Op {
-            line_index:     lineno,
-            line_position:  newline_idx,
-            op_type:        Optype::Rep,
-        });
+        let line = self.cloneline(lineno);
+        let op = Op { lineno, line, op_type: Optype::Rep };
+        self.do_op(op);
     }
 
     pub fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) {
         // Raw text mutation: insert is always preceded by a snapshot
         // and appropriate line copy
+        // TODO: check that last line in text points to end of text
         match mode {
-            InsertMode::Insert  => self.textbuffer.insert(colno, c),
-            InsertMode::Replace => self.textbuffer.replace(colno, c),
+            InsertMode::Insert  => {
+                let line = &mut self.lines[lineno];
+                line.stop += 1;
+                self.text.insert(line.start + colno, c as u8);
+            }
+            InsertMode::Replace => {
+                let line = &mut self.lines[lineno];
+                if colno == line.len() {
+                    self.text.push(c as u8);
+                    line.stop += 1;
+                } else {
+                    self.text[line.start + colno] = c as u8;
+                }
+            }
         }
     }
 
+    // TODO: rewrite in term of text Ops
     // CHECK: from/to should be inclusive
     pub fn delete_range(&mut self, from: Pos, to: Pos) {
         let mut y_start = usize(from.y);
@@ -1669,19 +1621,20 @@ impl Buffer {
         if y_start == y_stop {
             let oldlen = self.line_get(y_start).len();
             let newlen = oldlen - usize(to.x - from.x);
-            let newline_idx = self.textbuffer.emptyline();
-            self.textbuffer.text.reserve(newlen);
+            self.text.reserve(newlen);
+            let mut line = self.line_empty();
+            line.stop += newlen;
 
             for i in 0..usize(from.x) {
                 let c =  self.line_get(y_start).char_at(i);
-                self.textbuffer.append(c);
+                self.text.push(c as u8);
             }
             for i in usize(to.x)..oldlen {
                 let c =  self.line_get(y_start).char_at(i);
-                self.textbuffer.append(c);
+                self.text.push(c as u8);
             }
 
-            self.line_indexes[y_start] = newline_idx;
+            self.lines[y_start] = line;
 
             return
         }
@@ -1704,13 +1657,9 @@ impl Buffer {
 
         let gap = y_stop - y_start;
         if gap > 0 {
-            for i in y_stop..self.last_line() {
-                let line_idx = self.line_indexes[i];
-                self.line_indexes[i - gap] = line_idx;
-            }
-            unsafe {
-                let new_nlines = usize(self.nlines()) - gap;
-                self.line_indexes.set_len(new_nlines);
+            // PERF: this is inefficient: do a batch delete instead
+            for i in y_stop..self.line_last() {
+                self.line_del(y_start);
             }
         }
     }
@@ -1795,7 +1744,6 @@ fn file_load(filename: &str) -> Re<Vec<u8>> {
 #[derive(Debug, Copy, Clone)]
 struct Snapshot {
     text_cursor:    usize,
-    line_cursor:    usize,
     op_cursor:      usize,
     dirty:          bool,
     cursor:         Pos,
@@ -1804,9 +1752,9 @@ struct Snapshot {
 // A line operation on the buffer
 #[derive(Debug, Copy, Clone)]
 struct Op {
-    line_index:     usize,
-    line_position:  usize,
-    op_type:        Optype,
+    lineno:     usize,
+    line:       Range,
+    op_type:    Optype,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1819,35 +1767,23 @@ enum Optype {
 impl Op {
     fn do_op(&mut self, buffer: &mut Buffer) {
         match self.op_type {
-            Optype::Del => self.line_position = buffer.line_indexes.remove(self.line_index),
-            Optype::Ins => buffer.line_indexes.insert(self.line_index, self.line_position),
-            Optype::Rep => self.do_replace(buffer),
+            Optype::Del => self.line = buffer.lines.remove(self.lineno),
+            Optype::Ins => buffer.lines.insert(self.lineno, self.line),
+            Optype::Rep => swap(&mut self.line, &mut buffer.lines[self.lineno]),
         }
     }
 
     fn undo_op(&mut self, buffer: &mut Buffer) {
         match self.op_type {
-            Optype::Del => buffer.line_indexes.insert(self.line_index, self.line_position),
-            Optype::Ins => { buffer.line_indexes.remove(self.line_index); }
-            Optype::Rep => self.do_replace(buffer),
+            Optype::Del => buffer.lines.insert(self.lineno, self.line),
+            Optype::Ins => { buffer.lines.remove(self.lineno); }
+            Optype::Rep => swap(&mut self.line, &mut buffer.lines[self.lineno]),
         };
     }
-
-    fn do_replace(&mut self, buffer: &mut Buffer) {
-// try this alternative
-//        use std;
-//        self.line_position =
-//            std::mem::replace(&mut buffer.line_indexes[self.line_index], self.line_position);
-        let old_idx = buffer.line_indexes[self.line_index];
-        buffer.line_indexes[self.line_index] = self.line_position;
-        self.line_position = old_idx;
-    }
-
 }
 
 
 } // mod text
-
 
 
 /* COMMAND AND BUFFER MANIPULATION */
