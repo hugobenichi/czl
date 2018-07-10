@@ -35,6 +35,7 @@ macro_rules! check {
 
 /*
  * Buffer operation migration
+ *  - for delete and backspace, need ability to put cursor 1 right beyond end of line
  *  - composite ops
  *      join range,
  *      delete range,
@@ -45,6 +46,8 @@ macro_rules! check {
  *  - double check Buffer::delete
  *          some issues when jumping to next line / previous line
  *  - debug redo() and make sure undo/redo works
+ *  - better track dity flag:
+ *      make all Buffer ops return a new Cursor position and a Dirty flag
  *
  * Features:
  *  - offer to save if panic
@@ -325,8 +328,8 @@ impl Mode {
         match i {
             Key(ESC) | EscZ                 => SwitchCommand,
             Key(ENTER)                      => LineBreak(e.view.cursor),
-            Key(c) if c == BACKSPACE        => Backspace(e.view.cursor),
-            Key(c) if c == DEL              => Delete(e.view.cursor),
+            Key(c) if c == DEL              => Backspace(e.view.cursor),
+            Key(c) if c == BACKSPACE        => Delete(e.view.cursor),
             Key(c)                          => CharInsert(e.view.cursor, c),
             _                               => Noop,
         }
@@ -1634,6 +1637,80 @@ impl Buffer {
         }
     }
 
+    pub fn delete(&mut self, cursor: Pos, next_cursor: Pos) {
+        let colno = usize(cursor.x);
+        let lineno = usize(cursor.y);
+        let len = self.line_len(lineno);
+
+        if len == 0 {
+            self.line_del(lineno);
+            return
+        }
+
+        if lineno == self.line_last() && colno == len - 1 {
+            self.lines[lineno].stop -= 1;
+            return;
+        }
+
+        // Cursor is at a line boundary
+        // PERF: no need to copy the current edited line one more time
+        if cursor.y != next_cursor.y {
+
+
+            // WHATTODO if the next line is empty
+            if self.lines[lineno + 1].len() == 0 {
+                self.line_del(lineno + 1);
+                return
+            }
+
+            self.lines[lineno].stop -= 1;
+            self.line_join(lineno);
+            return
+        }
+
+        // TODO=: do delete one instead !
+        self.delete_range(cursor, cursor + pos(1,0));
+    }
+
+    pub fn backspace(&mut self, cursor_prev: Pos, cursor: Pos) -> Opresult {
+        let mut r = Opresult {
+            cursor: cursor_prev,
+            dirty: false,
+        };
+
+        // first line, first char: noop
+        if cursor == pos(0,0) {
+            return r
+        }
+
+        r.dirty = true;
+
+        let lineno = usize(cursor.y);
+        let len = self.line_len(lineno);
+
+        // current line is empty
+        if len == 0 {
+            self.line_del(lineno);
+            return r
+        }
+
+        // beggining of line and previous line is empty
+        if cursor.x == 0 && self.line_len(lineno - 1) == 0 {
+            self.line_del(lineno - 1);
+            return r
+        }
+
+        // beggining of line: join
+        if cursor.x == 0 {
+            self.line_join(lineno - 1);
+            return r
+        }
+
+        // TODO: do delete one instead !
+        self.delete_range(cursor_prev, cursor);
+        return r
+    }
+
     // TODO: rewrite in term of text Ops
     // CHECK: from/to should be inclusive
     pub fn delete_range(&mut self, from: Pos, to: Pos) {
@@ -1783,6 +1860,12 @@ struct Op {
 }
 
 #[derive(Debug, Copy, Clone)]
+pub struct Opresult {
+    pub cursor:     Pos,
+    pub dirty:      bool,
+}
+
+#[derive(Debug, Copy, Clone)]
 enum Optype {
     Del,
     Ins,
@@ -1917,23 +2000,16 @@ impl Insertstate {
 
             Delete(p) => {
                 let q = View::cursor_next(&e.buffer, p);
-                e.buffer.delete_range(p, q);
-
-                // if we deleted the last char:
-                //   we need to join the next line into the current line
-                //   do that by implementing a join line comment
+                e.buffer.delete(p, q);
             }
 
             Backspace(p) => {
+                // BUG if p == (0,0) and dirty should not become true if it as false
+                // BUG: when joining lines, cursor goes one char too far on the left, except if
+                //      empty line !
                 let q = View::cursor_prev(&e.buffer, p);
-                e.buffer.delete_range(q, p);
-                e.view.cursor = q;
-
-                // if we deleted the first char:
-                //   we need to
-                //      move up one line,
-                //      join the up line with the current line
-                //   => how to translate this into Ops ?
+                let r = e.buffer.backspace(q, p);
+                e.view.cursor = r.cursor;
             }
 
             // TODO: add SwitchReplace / SwitchInsert
