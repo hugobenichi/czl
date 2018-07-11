@@ -35,9 +35,7 @@ macro_rules! check {
 
 /*
  * Buffer operation migration
- *  - backspace: bug with undo on line boundary
- *  - delete/backspace: make sure all line mutation are recorded in the op history to
- *      support correctly delete and backspace in command mode
+ *  - for delete and backspace, need ability to put cursor 1 right beyond end of line
  *  - composite ops
  *      join range,
  *      delete range,
@@ -1644,7 +1642,7 @@ impl Buffer {
         Opresult::Change(pos(i32(colno) + 1, i32(lineno)))
     }
 
-    pub fn delete(&mut self, cursor: Pos) -> Opresult {
+    pub fn delete(&mut self, cursor: Pos, next_cursor: Pos) -> Opresult {
         let r = Opresult::Change(cursor);
 
         let colno = usize(cursor.x);
@@ -1659,7 +1657,6 @@ impl Buffer {
 
         // last char in file
         if lineno == self.line_last() && colno == len - 1 {
-            // TODO: needs to be changed to an Op so that this can be done in none insert mode
             self.lines[lineno].stop -= 1;
             return Opresult::Change(cursor - pos(1,0))
         }
@@ -1685,17 +1682,12 @@ impl Buffer {
         return Opresult::Change(cursor)
     }
 
-    pub fn backspace(&mut self, cursor: Pos) -> Opresult {
+    pub fn backspace(&mut self, cursor_prev: Pos, cursor: Pos) -> Opresult {
         // first line, first char: noop
         if cursor == pos(0,0) {
             return Opresult::Noop
         }
 
-        let mut cursor_prev = cursor - pos(1,0);
-        if cursor_prev.x < 0 {
-            let prev_len = self.line_len(usize(cursor.y) - 1);
-            cursor_prev = pos(i32(prev_len), cursor.y - 1);
-        }
         let r = Opresult::Change(cursor_prev);
 
         let lineno = usize(cursor.y);
@@ -2030,11 +2022,16 @@ impl Insertstate {
             }
 
             Delete(p) => {
-                e.buffer.delete(p)
+                let q = View::cursor_next(&e.buffer, p);
+                e.buffer.delete(p, q)
             }
 
             Backspace(p) => {
-                e.buffer.backspace(p)
+                // BUG if p == (0,0) and dirty should not become true if it as false
+                // BUG: when joining lines, cursor goes one char too far on the left, except if
+                //      empty line !
+                let q = View::cursor_prev(&e.buffer, p);
+                e.buffer.backspace(q, p)
             }
 
             // TODO: add SwitchReplace / SwitchInsert
