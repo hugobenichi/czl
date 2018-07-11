@@ -1577,7 +1577,7 @@ impl Buffer {
         self.line_del(lineno + 1);
     }
 
-    pub fn line_break(&mut self, lineno: usize, colno: usize) {
+    pub fn line_break(&mut self, lineno: usize, colno: usize) -> Opresult {
         let (left, right) = self.line_get(lineno).cut(colno);
 
         self.do_op(Op {
@@ -1590,6 +1590,8 @@ impl Buffer {
             line:       right,
             op_type:    Optype::Ins,
         });
+
+        Opresult::Change(pos(0, i32(lineno) + 1))
     }
 
     fn text_copy(&mut self, r: Range) {
@@ -1615,10 +1617,11 @@ impl Buffer {
         self.do_op(op);
     }
 
-    pub fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) {
+    pub fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) -> Opresult {
         // Raw text mutation: insert is always preceded by a snapshot
         // and appropriate line copy
         // TODO: check that last line in text points to end of text
+        // TODO: think about auto linebreak
         match mode {
             InsertMode::Insert  => {
                 let line = &mut self.lines[lineno];
@@ -1635,21 +1638,25 @@ impl Buffer {
                 }
             }
         }
+
+        Opresult::Change(pos(i32(colno) + 1, i32(lineno)))
     }
 
-    pub fn delete(&mut self, cursor: Pos, next_cursor: Pos) {
+    pub fn delete(&mut self, cursor: Pos, next_cursor: Pos) -> Opresult {
+        let r = Opresult::Change(cursor);
+
         let colno = usize(cursor.x);
         let lineno = usize(cursor.y);
         let len = self.line_len(lineno);
 
         if len == 0 {
             self.line_del(lineno);
-            return
+            return r
         }
 
         if lineno == self.line_last() && colno == len - 1 {
             self.lines[lineno].stop -= 1;
-            return;
+            return r
         }
 
         // Cursor is at a line boundary
@@ -1660,30 +1667,26 @@ impl Buffer {
             // WHATTODO if the next line is empty
             if self.lines[lineno + 1].len() == 0 {
                 self.line_del(lineno + 1);
-                return
+                return r
             }
 
             self.lines[lineno].stop -= 1;
             self.line_join(lineno);
-            return
+            return r
         }
 
         // TODO=: do delete one instead !
         self.delete_range(cursor, cursor + pos(1,0));
+        return r
     }
 
     pub fn backspace(&mut self, cursor_prev: Pos, cursor: Pos) -> Opresult {
-        let mut r = Opresult {
-            cursor: cursor_prev,
-            dirty: false,
-        };
-
         // first line, first char: noop
         if cursor == pos(0,0) {
-            return r
+            return Opresult::Noop
         }
 
-        r.dirty = true;
+        let r = Opresult::Change(cursor_prev);
 
         let lineno = usize(cursor.y);
         let len = self.line_len(lineno);
@@ -1860,9 +1863,10 @@ struct Op {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct Opresult {
-    pub cursor:     Pos,
-    pub dirty:      bool,
+pub enum Opresult {
+    Noop,
+    Cursor(Pos),
+    Change(Pos),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1893,6 +1897,20 @@ impl Op {
 
 } // mod text
 
+// TODO: find better place
+fn update_buffer(r: text::Opresult, e: &mut Editor) {
+    use text::Opresult::*;
+    match r {
+        Cursor(p) => {
+            e.view.cursor = p;
+        }
+        Change(p) => {
+            e.view.cursor = p;
+            e.buffer.dirty = true;
+        }
+        _ => (),
+    }
+}
 
 /* COMMAND AND BUFFER MANIPULATION */
 impl Commandstate {
@@ -1942,8 +1960,8 @@ impl Commandstate {
                 let lineno = usize(y);
                 let colno = usize(x);
                 e.buffer.snapshot(e.view.cursor);
-                e.buffer.line_break(lineno, colno);
-                e.view.cursor = pos(0, y + 1);
+                let r = e.buffer.line_break(lineno, colno);
+                update_buffer(r, e);
             }
 
             Undo => {
@@ -1984,23 +2002,26 @@ impl Commandstate {
 impl Insertstate {
     fn do_insert(mode: InsertMode, op: InsertOp, e: &mut Editor) -> Re<Mode> {
         use InsertOp::*;
-        match op {
+        use text::Opresult;
+
+        let mut next_mode = Mode::Insert(mode);
+
+        let opresult = match op {
             LineBreak(Pos { x, y }) => {
-                e.buffer.line_break(usize(y), usize(x));
-                e.view.cursor = pos(0, y + 1);
+                e.buffer.line_break(usize(y), usize(x))
+            }
+
+            CharInsert(p, c) if !is_printable(c) => {
+                Opresult::Noop
             }
 
             CharInsert(Pos { x, y }, c) => {
-                if is_printable(c) {
-                    e.buffer.insert(mode, usize(y), usize(x), c);
-                    e.view.cursor = pos(x + 1, y);
-                    // TODO: think about auto linebreak
-                }
+                e.buffer.insert(mode, usize(y), usize(x), c)
             }
 
             Delete(p) => {
                 let q = View::cursor_next(&e.buffer, p);
-                e.buffer.delete(p, q);
+                e.buffer.delete(p, q)
             }
 
             Backspace(p) => {
@@ -2008,19 +2029,24 @@ impl Insertstate {
                 // BUG: when joining lines, cursor goes one char too far on the left, except if
                 //      empty line !
                 let q = View::cursor_prev(&e.buffer, p);
-                let r = e.buffer.backspace(q, p);
-                e.view.cursor = r.cursor;
+                e.buffer.backspace(q, p)
             }
 
             // TODO: add SwitchReplace / SwitchInsert
 
-            SwitchCommand =>
-                return Ok(Mode::default_command_state),
+            SwitchCommand => {
+                next_mode = Mode::default_command_state;
+                Opresult::Noop
+            }
 
-            Noop => (),
-        }
+            Noop => {
+                Opresult::Noop
+            }
+        };
 
-        Ok(Mode::Insert(mode))
+        update_buffer(opresult, e);
+
+        Ok(next_mode)
     }
 }
 
