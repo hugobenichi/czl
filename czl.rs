@@ -35,21 +35,24 @@ macro_rules! check {
 
 /*
  * Buffer operation migration
- *  - backspace: bug with undo on line boundary
- *  - delete/backspace: make sure all line mutation are recorded in the op history to
- *      support correctly delete and backspace in command mode
- *  - composite ops
- *      join range,
- *      delete range,
+ *  - CommandOps: migrate to Opresult,
+ *  - CommandOps: regroup parameters like cursor and eliminate e.view
+ *  - regroup CommandOps on buffer and InsertOps ?
+ *  - CommandOps: composite ops
+ *      join line range,
+ *      delete line range,
+ *      delete range
+ *      delete vertical range:w
  *      cut line section
  *          => delete and backspace in command mode
  *      replace line section,
- *  - implement join line for delete char in insert mode
- *  - double check Buffer::delete
- *          some issues when jumping to next line / previous line
  *  - debug redo() and make sure undo/redo works
+ *  - undo bug: backspace on undo on line boundary in insert mode
+ *  - undo bug: in normal mode backspace on first char, then backspace again, undo does not bring
+ *  back line immediately (but eventually restore text after one more undo)
+ *  - undo bug: when deleting last char on line in command mode, undo does not bring back that char
  *  - better track dity flag:
- *      make all Buffer ops return a new Cursor position and a Dirty flag
+ *      once everything use Opresult: fix dirty bugs and history bugs when a noop happens
  *
  * Features:
  *  - offer to save if panic
@@ -64,10 +67,9 @@ macro_rules! check {
  *
  * TODOs and cleanups
  *  - PERF add clear in sub rec to framebuffer and use Draw in Drawinfo to redraw only what's needed
- *  - Line/Range: implement iterator
- *  - need to implement char/line next/previous
  *  - fuzzer
  *  - handle resize
+ *  - tab expansion
  *  - utf8 support: Range and Filebuffer, Input, ... don't wait too much
  */
 
@@ -310,6 +312,8 @@ impl Mode {
             Key('q')    => LineJoin(e.view.cursor),
             Key(ENTER)  => LineBreak(e.view.cursor),
             Key('d')    => LineDel(e.view.cursor),
+            Key('x')    => CharDelete(e.view.cursor),
+            Key(CTRL_X) => CharBackspace(e.view.cursor),
             Key('u')    => Undo,
             Key('r')    => Redo,
             Key('\t')   => SwitchInsert,
@@ -359,6 +363,8 @@ enum CommandOp {
     LineNew(Pos),
     LineJoin(Pos),   // TODO join line with separator !
     LineBreak(Pos),
+    CharDelete(Pos),
+    CharBackspace(Pos),
     Undo,
     Redo,
     Save(String),
@@ -1616,7 +1622,6 @@ impl Buffer {
     fn text_copy(&mut self, r: Range) {
         self.text.reserve(r.len());
         for i in r.start..r.stop {
-            // Isn't there a better option that this ?
             let c = self.text[i];
             self.text.push(c);
         }
@@ -1636,8 +1641,9 @@ impl Buffer {
         self.do_op(op);
     }
 
-    pub fn insert_char(&mut self, mode: InsertMode, p: Pos, c: char) -> Opresult {
+    pub fn char_insert(&mut self, mode: InsertMode, p: Pos, c: char) -> Opresult {
         let (colno, lineno) = p.usize();
+        // check that we are operating in Insert mode !
         // TODO: think about auto linebreak
         match mode {
             InsertMode::Insert  => {
@@ -1659,7 +1665,23 @@ impl Buffer {
         Opresult::Change(p + pos(1, 0))
     }
 
-    pub fn delete(&mut self, cursor: Pos) -> Opresult {
+    pub fn char_delete(&mut self, cursor: Pos) {
+        let (colno, lineno) = cursor.usize();
+
+        if self.lines[lineno].stop != self.text.len() {
+            self.prepare_insert(lineno);
+        }
+
+        let Range { start, stop } = self.lines[lineno];
+        let linelen = stop - start - 1;
+        for i in colno..linelen {
+            let c =  self.text[start + i + 1];
+            self.text[start + i] = c;
+        }
+        self.lines[lineno].stop -= 1;
+    }
+
+    pub fn del(&mut self, cursor: Pos) -> Opresult {
         let r = Opresult::Change(cursor);
 
         let colno = usize(cursor.x);
@@ -1674,14 +1696,13 @@ impl Buffer {
 
         // last char in file
         if lineno == self.line_last() && colno == len - 1 {
-            // TODO: needs to be changed to an Op so that this can be done in none insert mode
-            self.lines[lineno].stop -= 1;
+            // BUG this does not work correctly in command mode and eats a character
+            self.char_delete(cursor);
             return Opresult::Change(cursor - pos(1,0))
         }
 
         // last char on line
         if colno == len - 1 {
-
             // next line is empty
             if self.line_len(lineno + 1) == 0 {
                 self.line_del(lineno + 1);
@@ -1689,15 +1710,15 @@ impl Buffer {
             }
 
             // else join lines
+            // BUG: use a line op here
             self.lines[lineno].stop -= 1;
             self.line_join(lineno);
             return Opresult::Change(cursor)
         }
 
-        // TODO=: do delete one instead !
-        self.delete_range(cursor, cursor + pos(1,0));
+        self.char_delete(cursor);
 
-        return Opresult::Change(cursor)
+        Opresult::Change(cursor)
     }
 
     pub fn backspace(&mut self, cursor: Pos) -> Opresult {
@@ -1734,64 +1755,9 @@ impl Buffer {
             return r
         }
 
-        // TODO: do delete one instead !
-        self.delete_range(cursor_prev, cursor);
-        return r
-    }
+        self.char_delete(cursor_prev);
 
-    // TODO: rewrite in term of text Ops
-    // CHECK: from/to should be inclusive
-    pub fn delete_range(&mut self, from: Pos, to: Pos) {
-        let mut y_start = usize(from.y);
-        let mut y_stop = usize(to.y);
-
-        check!(y_start <= y_stop);
-
-        // Case 1: delete a range in a single line
-        if y_start == y_stop {
-            let oldlen = self.line_get(y_start).len();
-            let newlen = oldlen - usize(to.x - from.x);
-            self.text.reserve(newlen);
-            let mut line = self.line_empty();
-            line.stop += newlen;
-
-            for i in 0..usize(from.x) {
-                let c =  self.line_get(y_start).char_at(i);
-                self.text.push(c as u8);
-            }
-            for i in usize(to.x)..oldlen {
-                let c =  self.line_get(y_start).char_at(i);
-                self.text.push(c as u8);
-            }
-
-            self.lines[y_start] = line;
-
-            return
-        }
-
-        // Case 2: delete more than one line.
-        //          1) trim the first line on the right
-        //          2) trim the last line on the left
-        //          3) delete any line in between
-        if from.x != 0 {
-            let (keep, _) = self.line_get(y_start).cut(usize(from.x));
-            self.line_set(y_start, keep);
-            y_start += 1;
-        }
-
-        if usize(to.x) != self.line_get(y_stop).len() {
-            let (_, keep) = self.line_get(y_stop).cut(usize(to.x));
-            self.line_set(y_stop, keep);
-            y_stop -= 1;
-        }
-
-        let gap = y_stop - y_start;
-        if gap > 0 {
-            // PERF: this is inefficient: do a batch delete instead
-            for i in y_stop..self.line_last() {
-                self.line_del(y_start);
-            }
-        }
+        r
     }
 
     pub fn undo(&mut self) -> Option<Pos> {
@@ -1987,6 +1953,18 @@ impl Commandstate {
                 update_buffer(r, e);
             }
 
+            CharDelete(p) => {
+                e.buffer.snapshot(e.view.cursor);
+                let r = e.buffer.del(p);
+                update_buffer(r, e);
+            }
+
+            CharBackspace(p) => {
+                e.buffer.snapshot(e.view.cursor);
+                let r = e.buffer.backspace(p);
+                update_buffer(r, e);
+            }
+
             Undo => {
                 match e.buffer.undo() {
                     Some(p) => e.view.cursor = p,
@@ -2041,11 +2019,11 @@ impl Insertstate {
             CharInsert(c) => {
                 // TODO: check that raw text mutation: insert is always preceded by a snapshot
                 // and appropriate line copy
-                e.buffer.insert_char(op.mode, op.cursor, c)
+                e.buffer.char_insert(op.mode, op.cursor, c)
             }
 
             Delete => {
-                e.buffer.delete(op.cursor)
+                e.buffer.del(op.cursor)
             }
 
             Backspace => {
