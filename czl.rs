@@ -266,8 +266,8 @@ impl Mode {
             }
 
             Insert(mode) => {
-                let op = Mode::input_to_insert_op(i, e);
-                Insertstate::do_insert(mode, op, e)?
+                let op = Mode::input_to_insert_op(mode, i, e);
+                Insertstate::do_insert(op, e)?
             }
 
             PendingInsert(mode) => {
@@ -324,16 +324,22 @@ impl Mode {
         }
     }
 
-    fn input_to_insert_op(i: Input, e: &Editor) -> InsertOp {
+    fn input_to_insert_op(mode: InsertMode, i: Input, e: &Editor) -> InsertOp {
         use Input::*;
-        use InsertOp::*;
-        match i {
+        use InsertOpType::*;
+        let optype = match i {
             Key(ESC) | EscZ                 => SwitchCommand,
-            Key(ENTER)                      => LineBreak(e.view.cursor),
-            Key(c) if c == DEL              => Backspace(e.view.cursor),
-            Key(c) if c == BACKSPACE        => Delete(e.view.cursor),
-            Key(c)                          => CharInsert(e.view.cursor, c),
+            Key(ENTER)                      => LineBreak,
+            Key(c) if c == DEL              => Backspace,
+            Key(c) if c == BACKSPACE        => Delete,
+            Key(c)                          => CharInsert(c),
             _                               => Noop,
+        };
+
+        InsertOp {
+            cursor: e.view.cursor,
+            optype,
+            mode,
         }
     }
 }
@@ -362,13 +368,19 @@ enum CommandOp {
     Noop,
 }
 
-enum InsertOp {
-    LineBreak(Pos),
-    CharInsert(Pos, char),
-    Delete(Pos),
-    Backspace(Pos),
+enum InsertOpType {
+    LineBreak,
+    CharInsert(char),
+    Delete,
+    Backspace,
     SwitchCommand,
     Noop,
+}
+
+struct InsertOp {
+    cursor: Pos,
+    optype: InsertOpType,
+    mode:   InsertMode,
 }
 
 // Point to a place inside a Buffer
@@ -678,6 +690,10 @@ impl Pos {
             min: self,
             max: self + diag,
         }
+    }
+
+    pub fn usize(self) -> (usize, usize) {
+        (self.x as usize, self.y as usize)
     }
 }
 
@@ -1579,7 +1595,8 @@ impl Buffer {
         self.line_del(lineno + 1);
     }
 
-    pub fn line_break(&mut self, lineno: usize, colno: usize) -> Opresult {
+    pub fn line_break(&mut self, p: Pos) -> Opresult {
+        let (colno, lineno) = p.usize();
         let (left, right) = self.line_get(lineno).cut(colno);
 
         self.do_op(Op {
@@ -1593,7 +1610,7 @@ impl Buffer {
             op_type:    Optype::Ins,
         });
 
-        Opresult::Change(pos(0, i32(lineno) + 1))
+        Opresult::Change(pos(0, p.y + 1))
     }
 
     fn text_copy(&mut self, r: Range) {
@@ -1619,10 +1636,8 @@ impl Buffer {
         self.do_op(op);
     }
 
-    pub fn insert(&mut self, mode: InsertMode, lineno: usize, colno: usize, c: char) -> Opresult {
-        // Raw text mutation: insert is always preceded by a snapshot
-        // and appropriate line copy
-        // TODO: check that last line in text points to end of text
+    pub fn insert_char(&mut self, mode: InsertMode, p: Pos, c: char) -> Opresult {
+        let (colno, lineno) = p.usize();
         // TODO: think about auto linebreak
         match mode {
             InsertMode::Insert  => {
@@ -1641,7 +1656,7 @@ impl Buffer {
             }
         }
 
-        Opresult::Change(pos(i32(colno) + 1, i32(lineno)))
+        Opresult::Change(p + pos(1, 0))
     }
 
     pub fn delete(&mut self, cursor: Pos) -> Opresult {
@@ -1966,11 +1981,9 @@ impl Commandstate {
                 e.buffer.line_join(usize(p.y));
             }
 
-            LineBreak(Pos { x, y }) => {
-                let lineno = usize(y);
-                let colno = usize(x);
+            LineBreak(p) => {
                 e.buffer.snapshot(e.view.cursor);
-                let r = e.buffer.line_break(lineno, colno);
+                let r = e.buffer.line_break(p);
                 update_buffer(r, e);
             }
 
@@ -2010,31 +2023,33 @@ impl Commandstate {
 }
 
 impl Insertstate {
-    fn do_insert(mode: InsertMode, op: InsertOp, e: &mut Editor) -> Re<Mode> {
-        use InsertOp::*;
+    fn do_insert(op: InsertOp, e: &mut Editor) -> Re<Mode> {
+        use InsertOpType::*;
         use text::Opresult;
 
-        let mut next_mode = Mode::Insert(mode);
+        let mut next_mode = Mode::Insert(op.mode);
 
-        let opresult = match op {
-            LineBreak(Pos { x, y }) => {
-                e.buffer.line_break(usize(y), usize(x))
+        let opresult = match op.optype {
+            LineBreak => {
+                e.buffer.line_break(op.cursor)
             }
 
-            CharInsert(p, c) if !is_printable(c) => {
+            CharInsert(c) if !is_printable(c) => {
                 Opresult::Noop
             }
 
-            CharInsert(Pos { x, y }, c) => {
-                e.buffer.insert(mode, usize(y), usize(x), c)
+            CharInsert(c) => {
+                // TODO: check that raw text mutation: insert is always preceded by a snapshot
+                // and appropriate line copy
+                e.buffer.insert_char(op.mode, op.cursor, c)
             }
 
-            Delete(p) => {
-                e.buffer.delete(p)
+            Delete => {
+                e.buffer.delete(op.cursor)
             }
 
-            Backspace(p) => {
-                e.buffer.backspace(p)
+            Backspace => {
+                e.buffer.backspace(op.cursor)
             }
 
             // TODO: add SwitchReplace / SwitchInsert
