@@ -249,6 +249,7 @@ impl Mode {
 
     fn process_input(m: Mode, i: Input, e: &mut Editor) -> Re<Mode> {
         if i == Input::Key(CTRL_C) {
+            // TODO: ask confirmation if dirty files
             return Ok(Exit)
         }
 
@@ -297,33 +298,32 @@ impl Mode {
         use CommandOp::*;
         match i {
             // TODO: more sophisticated cursor movement ...
-            Key('h')    => Movement(Move::Left),
-            Key('j')    => Movement(Move::Down),
-            Key('k')    => Movement(Move::Up),
-            Key('l')    => Movement(Move::Right),
-            Key(' ')    => Recenter,
-            Key(CTRL_D) => PageDown,
-            Key(CTRL_U) => PageUp,
-            Key(CTRL_H) => FileStart,
-            Key(CTRL_L) => FileEnd,
-            // TODO: Consider changing to Mut(LineOp, cursor) for something more systematic ?
-            Key('o')    => LineNew(e.view.cursor + pos(0, 1)),
-            Key('O')    => LineNew(e.view.cursor),
-            Key('q')    => LineJoin(e.view.cursor),
-            Key(ENTER)  => LineBreak(e.view.cursor),
-            Key('d')    => LineDel(e.view.cursor),
-            Key('x')    => CharDelete(e.view.cursor),
-            Key(CTRL_X) => CharBackspace(e.view.cursor),
-            Key('u')    => Undo,
-            Key('r')    => Redo,
+            // TODO: handle mouse click
+            Key('h')    => BufferMove(MoveOp::Movement(Move::Left)),
+            Key('j')    => BufferMove(MoveOp::Movement(Move::Down)),
+            Key('k')    => BufferMove(MoveOp::Movement(Move::Up)),
+            Key('l')    => BufferMove(MoveOp::Movement(Move::Right)),
+            Key(' ')    => BufferMove(MoveOp::Recenter),
+            Key(CTRL_D) => BufferMove(MoveOp::PageDown),
+            Key(CTRL_U) => BufferMove(MoveOp::PageUp),
+            Key(CTRL_H) => BufferMove(MoveOp::FileStart),
+            Key(CTRL_L) => BufferMove(MoveOp::FileEnd),
+            Key('o')    => BufferOp(e.view.cursor + pos(0,1),   BufferOpType::LineNew),
+            Key('O')    => BufferOp(e.view.cursor,              BufferOpType::LineNew),
+            Key('q')    => BufferOp(e.view.cursor,              BufferOpType::LineJoin),
+            Key(ENTER)  => BufferOp(e.view.cursor,              BufferOpType::LineBreak),
+            Key('d')    => BufferOp(e.view.cursor,              BufferOpType::LineDel),
+            Key('x')    => BufferOp(e.view.cursor,              BufferOpType::CharDelete),
+            Key(CTRL_X) => BufferOp(e.view.cursor,              BufferOpType::CharBackspace),
+            Key('u')    => BufferOp(e.view.cursor,              BufferOpType::Undo),
+            Key('r')    => BufferOp(e.view.cursor,              BufferOpType::Redo),
             Key('\t')   => SwitchInsert,
             Key(CTRL_R) => SwitchReplace,
             Key('s')    => Save(format!("{}.tmp", e.view.filepath)),
             Key('\\')   => ClearConsole,
-            Key('b')
-                        => panic!("BOOM !"),
-                        //=> return er!("BOOM !"),
-            // TODO: handle mouse click
+            //Key('b')
+            //            => panic!("BOOM !"),
+            //            //=> return er!("BOOM !"),
             _ => Noop,
         }
     }
@@ -348,30 +348,34 @@ impl Mode {
     }
 }
 
-
-
-// TODO: CommandOp and InsertOp should actually be merged ??
-// TODO: split into movement ops, buffer ops, + misc
 enum CommandOp {
+    BufferOp(Pos, BufferOpType),
+    BufferMove(MoveOp),
+    Save(String),
+    SwitchInsert,
+    SwitchReplace,
+    ClearConsole,
+    Noop,
+}
+
+enum MoveOp {
     Movement(Move),
     Recenter,
     PageUp,
     PageDown,
     FileStart,
     FileEnd,
-    LineDel(Pos),
-    LineNew(Pos),
-    LineJoin(Pos),   // TODO join line with separator !
-    LineBreak(Pos),
-    CharDelete(Pos),
-    CharBackspace(Pos),
+}
+
+enum BufferOpType {
+    LineDel,
+    LineNew,
+    LineJoin,   // TODO join line with separator !
+    LineBreak,
+    CharDelete,
+    CharBackspace,
     Undo,
     Redo,
-    Save(String),
-    SwitchInsert,
-    SwitchReplace,
-    ClearConsole,
-    Noop,
 }
 
 enum InsertOpType {
@@ -1907,9 +1911,40 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
 impl Commandstate {
     fn do_command(&mut self, op: CommandOp, e: &mut Editor) -> Re<Mode> {
         use CommandOp::*;
+        use MoveOp::*;
         use Mode::*;
         match op {
-            Movement(mvt)=>
+            BufferMove(m) =>
+                self.do_buffer_move(m, e),
+
+            BufferOp(p, op) =>
+                self.do_buffer_op(p, op, e),
+
+            Save(path) =>
+                e.buffer.to_file(&path)?,
+
+            ClearConsole => Debugconsole::clear(),
+
+            SwitchInsert => {
+                let mode = InsertMode::Insert;
+                return Ok(PendingInsert(mode))
+            }
+
+            SwitchReplace => {
+                let mode = InsertMode::Replace;
+                return Ok(PendingInsert(mode))
+            }
+
+            Noop => (),
+        }
+
+        Ok(Command(replace(self, Commandstate { })))
+    }
+
+    fn do_buffer_move(&mut self, op: MoveOp, e: &mut Editor) {
+        use MoveOp::*;
+        match op {
+            Movement(mvt) =>
                 e.mv_cursor(mvt),
 
             Recenter =>
@@ -1926,40 +1961,46 @@ impl Commandstate {
 
             FileEnd =>
                 e.view.go_file_end(&e.buffer),
+        }
+    }
 
-            LineDel(pos) => {
+    fn do_buffer_op(&mut self, p: Pos, op: BufferOpType, e: &mut Editor) {
+        // TODO collect Opresult and apply it for all cases
+        use BufferOpType::*;
+        match op {
+            LineDel => {
                 if e.buffer.nlines() > 0 {
-                    let lineno = usize(pos.y);
+                    let lineno = usize(p.y);
                     e.buffer.snapshot(e.view.cursor);
                     e.buffer.line_del(lineno);
                 }
             }
 
-            LineNew(p) => {
+            LineNew => {
                 let lineno = usize(p.y);
                 e.buffer.snapshot(e.view.cursor);
                 e.buffer.line_new(lineno);
                 e.view.cursor = pos(0, p.y);
             }
 
-            LineJoin(p) => {
+            LineJoin => {
                 e.buffer.snapshot(e.view.cursor);
                 e.buffer.line_join(usize(p.y));
             }
 
-            LineBreak(p) => {
+            LineBreak => {
                 e.buffer.snapshot(e.view.cursor);
                 let r = e.buffer.line_break(p);
                 update_buffer(r, e);
             }
 
-            CharDelete(p) => {
+            CharDelete => {
                 e.buffer.snapshot(e.view.cursor);
                 let r = e.buffer.del(p);
                 update_buffer(r, e);
             }
 
-            CharBackspace(p) => {
+            CharBackspace => {
                 e.buffer.snapshot(e.view.cursor);
                 let r = e.buffer.backspace(p);
                 update_buffer(r, e);
@@ -1978,25 +2019,7 @@ impl Commandstate {
                     None => (),
                 }
             }
-
-            Save(path) => e.buffer.to_file(&path)?,
-
-            ClearConsole => Debugconsole::clear(),
-
-            SwitchInsert => {
-                let mode = InsertMode::Insert;
-                return Ok(PendingInsert(mode))
-            }
-
-            SwitchReplace => {
-                let mode = InsertMode::Replace;
-                return Ok(PendingInsert(mode))
-            }
-
-            Noop => (),
         }
-
-        Ok(Command(replace(self, Commandstate { })))
     }
 }
 
