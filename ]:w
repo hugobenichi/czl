@@ -1149,8 +1149,8 @@ impl Framebuffer {
             buffer.set_len(0); // safe because element are pure values
         }
 
-        append(&mut buffer, b"\x1b[?25l");  // hide cursor
-        append(&mut buffer, b"\x1b[H");     // go home
+        append(&mut buffer, term_cursor_hide);
+        append(&mut buffer, term_gohome);
 
         let w = self.window.x as usize;
         let mut l = 0;
@@ -1161,7 +1161,7 @@ impl Framebuffer {
         for i in 0..self.window.y {
             if i > 0 {
                 // Do not put "\r\n" on the last line
-                append(&mut buffer, b"\r\n");
+                append(&mut buffer, term_newline);
             }
 
 
@@ -1211,7 +1211,7 @@ impl Framebuffer {
 
         //let cursor_command = format!("\x1b[{};{}H", self.cursor.y + 1, self.cursor.x + 1);
         //append(&mut buffer, cursor_command.as_bytes());
-        append(&mut buffer, b"\x1b[?25h");
+        append(&mut buffer, term_cursor_show);
 
         // IO to terminal
         {
@@ -2251,11 +2251,10 @@ impl Term {
         if !CONF.no_raw_mode {
             let stdout = io::stdout();
             let mut h = stdout.lock();
-            h.write(b"\x1b[s")?;            // save cursor
-            h.write(b"\x1b[?47h")?;         // go offscreen
-            h.write(b"\x1b[?1000h")?;       // get mouse event
-            h.write(b"\x1b[?1002h")?;       // track mouse event
-            h.write(b"\x1b[?1004h")?;       // get focus event
+            h.write(term_cursor_save)?;
+            h.write(term_switch_offscreen)?;
+            h.write(term_switch_mouse_event_on)?;
+            h.write(term_switch_mouse_tracking_on)?;
             h.flush()?;
 
             unsafe {
@@ -2286,11 +2285,10 @@ impl Term {
 
         let stdout = io::stdout();
         let mut h = stdout.lock();
-        h.write(b"\x1b[?1004l").unwrap();   // stop focus event
-        h.write(b"\x1b[?1002l").unwrap();   // stop mouse tracking
-        h.write(b"\x1b[?1000l").unwrap();   // stop mouse event
-        h.write(b"\x1b[?47l").unwrap();     // go back to main screen
-        h.write(b"\x1b[u").unwrap();        // restore cursor
+        h.write(term_switch_mouse_tracking_off).unwrap();
+        h.write(term_switch_mouse_event_off).unwrap();
+        h.write(term_switch_mainscreen).unwrap();
+        h.write(term_cursor_restore).unwrap();
         h.flush().unwrap();
 
         unsafe {
@@ -2299,6 +2297,24 @@ impl Term {
         }
     }
 }
+
+
+// CLEANUP: this should not have to be exposed
+pub const term_clear                      : &[u8] = b"\x1bc";
+pub const term_cursor_hide                : &[u8] = b"\x1b[?25l";
+pub const term_cursor_show                : &[u8] = b"\x1b[?25h";
+const term_cursor_save                : &[u8] = b"\x1b[s";
+const term_cursor_restore             : &[u8] = b"\x1b[u";
+pub const term_switch_offscreen           : &[u8] = b"\x1b[?47h";
+pub const term_switch_mainscreen          : &[u8] = b"\x1b[?47l";
+pub const term_switch_mouse_event_on      : &[u8] = b"\x1b[?1000h";
+pub const term_switch_mouse_tracking_on   : &[u8] = b"\x1b[?1002h";
+pub const term_switch_mouse_tracking_off  : &[u8] = b"\x1b[?1002l";
+pub const term_switch_mouse_event_off     : &[u8] = b"\x1b[?1000l";
+pub const term_switch_focus_event_on      : &[u8] = b"\x1b[?1004h";
+pub const term_switch_focus_event_off     : &[u8] = b"\x1b[?1004l";
+pub const term_gohome                     : &[u8] = b"\x1b[H";
+pub const term_newline                    : &[u8] = b"\r\n";
 
 
 /* KEY INPUT HANDLING */
@@ -2366,7 +2382,6 @@ impl Input {
             CTRL_RIGHT_BRACKET  => &"^]",
             CTRL_CARET          => &"^^",
             CTRL_UNDERSCORE     => &"^_",
-            SPACE               => &"Space",
             DEL                 => &"Del",
             _                   => return None,
         };
@@ -2376,7 +2391,7 @@ impl Input {
     fn fmt_key_name(c: char, f: &mut fmt::Formatter) -> fmt::Result {
         match Input::key_descr(c) {
             Some(s) => f.write_str(s),
-            None    => write!(f, "{}", c),
+            None    => write!(f,"{}", c),
         }
     }
 }
@@ -2414,7 +2429,6 @@ pub const CTRL_BACKSLASH        : char = '\x1c';
 pub const CTRL_RIGHT_BRACKET    : char = '\x1d';
 pub const CTRL_CARET            : char = '\x1e';
 pub const CTRL_UNDERSCORE       : char = '\x1f';
-pub const SPACE                 : char = '\x20';
 pub const DEL                   : char = '\x7f';
 pub const ESC                   : char = CTRL_LEFT_BRACKET;
 pub const BACKSPACE             : char = CTRL_H;
@@ -2427,7 +2441,7 @@ pub const ENTER                 : char = CTRL_M;
 pub const RESIZE                : char = 255 as char; //'\xff';
 
 pub fn is_printable(c : char) -> bool {
-    SPACE <= c && c < DEL
+    ESC < c && c < DEL
 }
 
 //fn read_char() -> Re<char> {
