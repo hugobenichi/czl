@@ -155,378 +155,6 @@ pub struct Config {
 } // mod conf
 
 
-/* CORE TYPE DEFINITION */
-
-// The core editor structure
-// TODO: add open buffer list, open views, open screens
-struct Editor {
-    window:         Pos,        // The dimensions of the editor and backend terminal window
-    mainscreen:     Rec,        // The screen area for displaying file content and menus.
-    footer:         Rec,
-    buffer:         Buffer,     // The one file loaded in the editor
-    view:           View,       // The one view of the one file loaded
-    screen:         Screen,     // The one screen associated to the one file loaded
-}
-
-#[derive(Debug)]
-enum Move {
-    Left,
-    Right,
-    Up,
-    Down,
-    Start,
-    End,
-}
-
-#[derive(Debug)]
-enum MovementMode {
-    Chars,
-    Lines,
-    Blocks,
-    Words,
-    Digits,
-    Numbers,
-    Paragraphs,
-    Parens,
-    Brackets,
-    Braces,
-    Selection,
-    Pages,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Mode {
-    Command(Commandstate),
-    Insert(InsertMode),
-    PendingInsert(InsertMode),
-    Exit,
-}
-
-
-// TODO: eliminate Commandstate and Insertstate and put the data inside the Mode?
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Commandstate {
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Insertstate {
-}
-
-// Left justified, fixed length strings.
-const MODE_COMMAND  : &'static str = "Command  ";
-const MODE_INSERT   : &'static str = "Insert   ";
-const MODE_PINSERT  : &'static str = "Insert?  ";
-const MODE_REPLACE  : &'static str = "Replace  ";
-const MODE_PREPLACE : &'static str = "Replace? ";
-const MODE_EXIT     : &'static str = "Exit     ";
-
-impl Mode {
-    const default_command_state : Mode = Mode::Command(Commandstate { });
-
-    fn footer_color(self) -> Colorcell {
-        use Mode::*;
-        match self {
-            Command(_)                              => CONF.color_mode_command,
-            Insert(InsertMode::Insert)              => CONF.color_mode_insert,
-            Insert(InsertMode::Replace)             => CONF.color_mode_replace,
-            PendingInsert(InsertMode::Insert)       => CONF.color_mode_insert,
-            PendingInsert(InsertMode::Replace)      => CONF.color_mode_replace,
-            Exit                                    => CONF.color_mode_exit,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        use Mode::*;
-        match self {
-            Command(_)                              => MODE_COMMAND,
-            Insert(InsertMode::Insert)              => MODE_INSERT,
-            Insert(InsertMode::Replace)             => MODE_REPLACE,
-            PendingInsert(InsertMode::Insert)       => MODE_PINSERT,
-            PendingInsert(InsertMode::Replace)      => MODE_PREPLACE,
-            Exit                                    => MODE_EXIT,
-        }
-    }
-
-    fn process_input(m: Mode, i: Input, e: &mut Editor) -> Re<Mode> {
-        if i == Input::Key(CTRL_C) {
-            // TODO: ask confirmation if dirty files
-            return Ok(Exit)
-        }
-
-        if i == Input::Resize {
-            logconsole("resize !");
-            return Ok(m)
-        }
-
-        use Mode::*;
-        let next = match m {
-            Command(mut state) => {
-                let op = Mode::input_to_command_op(i, e);
-                let next = state.do_command(op, e)?;
-                // should this instead be managed per operation in a more scoped way ?
-                e.view.update(&e.buffer);
-                next
-            }
-
-            Insert(mode) => {
-                let op = Mode::input_to_insert_op(mode, i, e);
-                Insertstate::do_insert(op, e)?
-            }
-
-            PendingInsert(mode) => {
-                e.buffer.snapshot(e.view.cursor);
-                e.buffer.prepare_insert(usize(e.view.cursor.y));
-                let insertmode = Insert(mode);
-                Mode::process_input(insertmode, i, e)?
-            }
-
-            Exit => {
-                panic!("cannot process input in Exit state")
-            }
-        };
-
-        // FUTURE: if the cursor moved position, update all other views of that file whose cursors is below lineno
-
-        // TODO: instead of aborting, handle input error processing, and check if any dirty files
-        // need saving !
-
-        Ok(next)
-    }
-
-    fn input_to_command_op(i: Input, e: &Editor) -> CommandOp {
-        use Input::*;
-        use CommandOp::*;
-        match i {
-            // TODO: more sophisticated cursor movement ...
-            // TODO: handle mouse click
-            Key('h')    => BufferMove(MoveOp::Movement(Move::Left)),
-            Key('j')    => BufferMove(MoveOp::Movement(Move::Down)),
-            Key('k')    => BufferMove(MoveOp::Movement(Move::Up)),
-            Key('l')    => BufferMove(MoveOp::Movement(Move::Right)),
-            Key(' ')    => BufferMove(MoveOp::Recenter),
-            Key(CTRL_D) => BufferMove(MoveOp::PageDown),
-            Key(CTRL_U) => BufferMove(MoveOp::PageUp),
-            Key(CTRL_H) => BufferMove(MoveOp::FileStart),
-            Key(CTRL_L) => BufferMove(MoveOp::FileEnd),
-            Key('o')    => BufferOp(e.view.cursor + pos(0,1),   BufferOpType::LineNew),
-            Key('O')    => BufferOp(e.view.cursor,              BufferOpType::LineNew),
-            Key('q')    => BufferOp(e.view.cursor,              BufferOpType::LineJoin),
-            Key(ENTER)  => BufferOp(e.view.cursor,              BufferOpType::LineBreak),
-            Key('d')    => BufferOp(e.view.cursor,              BufferOpType::LineDel),
-            Key('x')    => BufferOp(e.view.cursor,              BufferOpType::CharDelete),
-            Key(CTRL_X) => BufferOp(e.view.cursor,              BufferOpType::CharBackspace),
-            Key('u')    => BufferOp(e.view.cursor,              BufferOpType::Undo),
-            Key('r')    => BufferOp(e.view.cursor,              BufferOpType::Redo),
-            Key('\t')   => SwitchInsert,
-            Key(CTRL_R) => SwitchReplace,
-            Key('s')    => Save(format!("{}.tmp", e.view.filepath)),
-            Key('\\')   => ClearConsole,
-            //Key('b')
-            //            => panic!("BOOM !"),
-            //            //=> return er!("BOOM !"),
-            _ => Noop,
-        }
-    }
-
-    fn input_to_insert_op(mode: InsertMode, i: Input, e: &Editor) -> InsertOp {
-        use Input::*;
-        use InsertOpType::*;
-        let optype = match i {
-            Key(ESC) | EscZ                 => SwitchCommand,
-            Key(ENTER)                      => LineBreak,
-            Key(c) if c == DEL              => Backspace,
-            Key(c) if c == BACKSPACE        => Delete,
-            Key(c)                          => CharInsert(c),
-            _                               => Noop,
-        };
-
-        InsertOp {
-            cursor: e.view.cursor,
-            optype,
-            mode,
-        }
-    }
-}
-
-enum CommandOp {
-    BufferOp(Pos, BufferOpType),
-    BufferMove(MoveOp),
-    Save(String),
-    SwitchInsert,
-    SwitchReplace,
-    ClearConsole,
-    Noop,
-}
-
-enum MoveOp {
-    Movement(Move),
-    Recenter,
-    PageUp,
-    PageDown,
-    FileStart,
-    FileEnd,
-}
-
-enum BufferOpType {
-    LineDel,
-    LineNew,
-    LineJoin,   // TODO join line with separator !
-    LineBreak,
-    CharDelete,
-    CharBackspace,
-    Undo,
-    Redo,
-}
-
-enum InsertOpType {
-    LineBreak,
-    CharInsert(char),
-    Delete,
-    Backspace,
-    SwitchCommand,
-    Noop,
-}
-
-struct InsertOp {
-    cursor: Pos,
-    optype: InsertOpType,
-    mode:   InsertMode,
-}
-
-// Point to a place inside a Buffer
-struct Cursor<'a> {
-    buffer: &'a Buffer,
-}
-
-// Store states related to navigation in a given file.
-// All positions are in text coordinate.
-struct View {
-    filepath:           String,
-    relative_lineno:    bool,
-    movement_mode:      MovementMode,
-    show_token:         bool,
-    show_neighbor:      bool,
-    show_selection:     bool,
-    is_active:          bool,
-    cursor:             Pos,
-    cursor_memory:      Pos,
-    filearea:           Rec,
-    //selection:  Option<&[Selection]>
-}
-
-impl View {
-    fn mk_fileview(filepath: String, screensize: Pos) -> View {
-        View {
-            filepath,
-            relative_lineno:    CONF.relative_lineno,
-            movement_mode:      MovementMode::Chars,
-            show_token:         false,
-            show_neighbor:      false,
-            show_selection:     false,
-            is_active:          true,
-            cursor:             pos(0,0),
-            cursor_memory:      pos(0,0),
-            filearea:           screensize.rec(),
-        }
-    }
-
-// CLEANUP: move to Cursor impl
-    fn cursor_adjust(buffer: &Buffer, mut p: Pos) -> Pos {
-        p.y = min(p.y, buffer.nlines() - 1);
-        p.y = max(0, p.y);
-
-        // Right bound clamp pushes x to -1 for empty lines.
-        p.x = min(p.x, i32(buffer.line_len(usize(p.y))) - 1);
-        p.x = max(0, p.x);
-
-        p
-    }
-
-    // CHECKME: for cursor_next/prev, do I need to skip empty lines ?
-
-    fn cursor_next(buffer: &Buffer, p: Pos) -> Pos {
-        if p.x < i32(buffer.line_len(usize(p.y))) - 1 {
-            return p + pos(1,0)
-        }
-
-        if p.y < buffer.nlines() - 1 {
-            return pos(0, p.y + 1)
-        }
-
-        p // Hit end of file
-    }
-
-    fn cursor_prev(buffer: &Buffer, p: Pos) -> Pos {
-        if p.x > 0 {
-            return p - pos(1,0)
-        }
-
-        if p.y > 0 {
-            let y = p.y - 1;
-            let x = max(0, i32(buffer.line_len(usize(y))) - 1);
-            return pos(x, y)
-        }
-
-        p // Hit beggining of file
-    }
-
-    fn update(&mut self, buffer: &Buffer) {
-        if buffer.nlines() == 0 {
-            return;
-        }
-
-        self.cursor = View::cursor_adjust(buffer, self.cursor);
-
-        // text range adjustment
-        {
-            let p = self.cursor;
-
-            let mut dx = 0;
-            let mut dy = 0;
-
-            if p.y < self.filearea.min.y {
-                dy = p.y - self.filearea.min.y;
-            }
-            if self.filearea.max.y <= p.y {
-                dy = p.y + 1 - self.filearea.max.y;
-            }
-            if p.x < self.filearea.min.x {
-                dx = p.x - self.filearea.min.x;
-            }
-            if self.filearea.max.x <= p.x {
-                dx = p.x + 1 - self.filearea.max.x;
-            }
-
-            self.filearea = self.filearea + pos(dx, dy);
-        }
-    }
-
-    fn recenter(&mut self, buffer: &Buffer) {
-        let size = self.filearea.size();
-        let y = max(0, self.cursor.y - size.y / 2);
-        self.filearea = pos(self.cursor.x, y).extrude(size);
-    }
-
-    fn go_page_down(&mut self, buffer: &Buffer) {
-        let y = min(buffer.nlines() - 1, self.cursor.y + 50);
-        self.cursor = pos(self.cursor.x, y);
-    }
-
-    fn go_page_up(&mut self, buffer: &Buffer) {
-        let y = max(0, self.cursor.y - 50);
-        self.cursor = pos(self.cursor.x, y);
-    }
-
-    fn go_file_start(&mut self, buffer: &Buffer) {
-        self.cursor = pos(self.cursor.x, 0);
-    }
-
-    fn go_file_end(&mut self, buffer: &Buffer) {
-        self.cursor = pos(self.cursor.x, buffer.nlines() - 1);
-    }
-}
-
-
 
 
 /* CORE TYPES */
@@ -777,6 +405,9 @@ impl Sub<Pos> for Rec {
 
 } // mod core
 
+
+
+
 /* UTILITIES */
 #[macro_use]
 mod util {
@@ -1024,6 +655,324 @@ impl Debugconsole {
 
 
 } // mod util
+
+
+
+
+/* TERMINAL BINDINGS */
+mod term {
+
+
+use std::fmt;
+use std::cmp::max;
+use std::cmp::min;
+use std::error::Error;
+use std::io;
+use std::io::Read;
+use std::io::Write;
+use std::panic;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::SyncSender;
+
+use conf::CONF;
+use core::*;
+use util::*;
+
+
+#[repr(C)]
+struct TermWinsize {
+    ws_row:     u16,
+    ws_col:     u16,
+    ws_xpixel:  u16,
+    ws_ypixel:  u16,
+}
+
+
+#[link(name = "term", kind = "static")]
+extern "C" {
+    fn terminal_get_size() -> TermWinsize;
+    fn terminal_restore();
+    fn terminal_set_raw() -> i32;
+    fn read_1B() -> i32;
+}
+
+
+// Global variable for ensuring terminal restore happens once exactly.
+static mut is_raw : bool = false;
+
+
+// Empty object used to safely control terminal raw mode and properly exit raw mode at scope exit.
+pub struct Term {
+}
+
+impl Drop for Term {
+    fn drop(&mut self) {
+        Term::restore();
+    }
+}
+
+impl Term {
+    pub fn size() -> Pos {
+        unsafe {
+            let ws = terminal_get_size();
+            pos(ws.ws_col as i32, ws.ws_row as i32)
+        }
+    }
+
+    pub fn set_raw() -> Re<Term> {
+        if !CONF.no_raw_mode {
+            let stdout = io::stdout();
+            let mut h = stdout.lock();
+            h.write(b"\x1b[s")?;            // save cursor
+            h.write(b"\x1b[?47h")?;         // go offscreen
+            h.write(b"\x1b[?1000h")?;       // get mouse event
+            h.write(b"\x1b[?1002h")?;       // track mouse event
+            h.write(b"\x1b[?1004h")?;       // get focus event
+            h.flush()?;
+
+            unsafe {
+                let _ = terminal_set_raw();
+                is_raw = true;
+            }
+
+            // Ensure terminal is restored to default whenever a panic happens.
+            let std_panic_hook = panic::take_hook();
+            panic::set_hook(Box::new(move |panicinfo| {
+                Term::restore();
+                std_panic_hook(panicinfo);
+            }));
+        }
+
+        Ok(Term { })
+    }
+
+    fn restore() {
+        unsafe {
+            if CONF.no_raw_mode || !is_raw {
+                return
+            }
+        }
+
+        let stdout = io::stdout();
+        let mut h = stdout.lock();
+        h.write(b"\x1b[?1004l").unwrap();   // stop focus event
+        h.write(b"\x1b[?1002l").unwrap();   // stop mouse tracking
+        h.write(b"\x1b[?1000l").unwrap();   // stop mouse event
+        h.write(b"\x1b[?47l").unwrap();     // go back to main screen
+        h.write(b"\x1b[u").unwrap();        // restore cursor
+        h.flush().unwrap();
+
+        unsafe {
+            terminal_restore();
+            is_raw = false;
+        }
+    }
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Input {
+    Noinput,
+    Error,
+    UnknownEscSeq,
+    Key(char),
+    Click(Pos),
+    ClickRelease(Pos),
+    EscZ,               // shift + tab -> "\x1b[Z"
+    Resize,
+}
+
+impl fmt::Display for Input {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use Input::*;
+        match self {
+            Noinput                         => f.write_str(&"Noinput"),
+            Error                           => f.write_str(&"Error"),
+            UnknownEscSeq                   => f.write_str(&"Unknown"),
+            Key(c)                          => Input::fmt_key_name(*c, f),
+            Click(Pos { x, y })             => write!(f, "click ({},{})'", y, x),
+            ClickRelease(Pos { x, y })      => write!(f, "unclick ({},{})'", y, x),
+            EscZ                            => f.write_str(&"EscZ"),
+            Resize                          => f.write_str(&"Resize"),
+        }
+    }
+}
+
+impl Input {
+    // return Some(name) for keys with a special description
+    fn key_descr(c: char) -> Option<&'static str> {
+        let r = match c {
+            CTRL_AT             => &"^@",
+            CTRL_A              => &"^A",
+            CTRL_B              => &"^B",
+            CTRL_C              => &"^C",
+            CTRL_D              => &"^D",
+            CTRL_E              => &"^E",
+            CTRL_F              => &"^F",
+            CTRL_G              => &"^G",
+            BACKSPACE           => &"Backspace",
+            TAB                 => &"TAB",
+            CTRL_J              => &"^J",
+            CTRL_K              => &"^K",
+            CTRL_L              => &"^L",
+            ENTER               => &"Enter",
+            CTRL_N              => &"^N",
+            CTRL_O              => &"^O",
+            CTRL_P              => &"^P",
+            CTRL_Q              => &"^Q",
+            CTRL_R              => &"^R",
+            CTRL_S              => &"^S",
+            CTRL_T              => &"^T",
+            CTRL_U              => &"^U",
+            CTRL_V              => &"^V",
+            CTRL_W              => &"^W",
+            CTRL_X              => &"^X",
+            CTRL_Y              => &"^Y",
+            CTRL_Z              => &"^Z",
+            ESC                 => &"Esc",
+            CTRL_BACKSLASH      => &"^\\",
+            CTRL_RIGHT_BRACKET  => &"^]",
+            CTRL_CARET          => &"^^",
+            CTRL_UNDERSCORE     => &"^_",
+            SPACE               => &"Space",
+            DEL                 => &"Del",
+            _                   => return None,
+        };
+        Some(r)
+    }
+
+    fn fmt_key_name(c: char, f: &mut fmt::Formatter) -> fmt::Result {
+        match Input::key_descr(c) {
+            Some(s) => f.write_str(s),
+            None    => write!(f, "{}", c),
+        }
+    }
+}
+
+
+pub const CTRL_AT               : char = '\x00';
+pub const CTRL_A                : char = '\x01';
+pub const CTRL_B                : char = '\x02';
+pub const CTRL_C                : char = '\x03';
+pub const CTRL_D                : char = '\x04';
+pub const CTRL_E                : char = '\x05';
+pub const CTRL_F                : char = '\x06';
+pub const CTRL_G                : char = '\x07';
+pub const CTRL_H                : char = '\x08';
+pub const CTRL_I                : char = '\x09';
+pub const CTRL_J                : char = '\x0a';
+pub const CTRL_K                : char = '\x0b';
+pub const CTRL_L                : char = '\x0c';
+pub const CTRL_M                : char = '\x0d';
+pub const CTRL_N                : char = '\x0e';
+pub const CTRL_O                : char = '\x0f';
+pub const CTRL_P                : char = '\x10';
+pub const CTRL_Q                : char = '\x11';
+pub const CTRL_R                : char = '\x12';
+pub const CTRL_S                : char = '\x13';
+pub const CTRL_T                : char = '\x14';
+pub const CTRL_U                : char = '\x15';
+pub const CTRL_V                : char = '\x16';
+pub const CTRL_W                : char = '\x17';
+pub const CTRL_X                : char = '\x18';
+pub const CTRL_Y                : char = '\x19';
+pub const CTRL_Z                : char = '\x1a';
+pub const CTRL_LEFT_BRACKET     : char = '\x1b';
+pub const CTRL_BACKSLASH        : char = '\x1c';
+pub const CTRL_RIGHT_BRACKET    : char = '\x1d';
+pub const CTRL_CARET            : char = '\x1e';
+pub const CTRL_UNDERSCORE       : char = '\x1f';
+pub const SPACE                 : char = '\x20';
+pub const DEL                   : char = '\x7f';
+pub const ESC                   : char = CTRL_LEFT_BRACKET;
+pub const BACKSPACE             : char = CTRL_H;
+pub const TAB                   : char = CTRL_I;
+pub const LINE_FEED             : char = CTRL_J;
+pub const VTAB                  : char = CTRL_K;
+pub const NEW_PAGE              : char = CTRL_L;
+pub const ENTER                 : char = CTRL_M;
+
+// Special code
+pub const RESIZE                : char = 255 as char; //'\xff';
+
+
+pub fn is_printable(c : char) -> bool {
+    SPACE <= c && c < DEL
+}
+
+pub fn push_char(chan: &SyncSender<char>) {
+    let mut stdin = io::stdin();
+    let mut buf = [0;1];
+    // TODO: handle interrupts when errno == EINTR
+    // TODO: support unicode !
+    loop {
+        let n = stdin.read(&mut buf).unwrap(); // TODO: pass error through the channel ?
+        if n == 1 {
+            let c = buf[0];
+            let d = match Input::key_descr(c as char) {
+                Some(s) => logd(&format!("input: {}/{}\n", c, s)),
+                None    => logd(&format!("input: {}/{}\n", c, c as char)),
+            };
+            chan.send(buf[0] as char).unwrap();
+        }
+    }
+}
+
+pub fn pull_input(chan: &Receiver<char>) -> Re<Input> {
+    use Input::*;
+    use std::sync::mpsc::TryRecvError::*;
+
+    let c = chan.recv()?;
+
+    if c == RESIZE {
+        return Ok(Resize);
+    }
+
+    if c != ESC {
+        return Ok(Key(c))
+    }
+
+    // Escape: if no more char immediately available, return ESC, otherwise parse an escape sequence
+
+    match chan.try_recv() {
+        Ok(c) if c == '['       => (),                          // Escape sequence: continue parsing
+        Ok(c)                   => return Ok(UnknownEscSeq),    // Error while parsing: bail out
+        Err(Empty)              => return Ok(Key(ESC)),         // Nothing more: this was just an escape key
+        Err(e)                  => return er!(e.description()),
+    }
+
+    match chan.recv()? {
+        'M' =>  (), // Mouse click, handled below
+        'Z' =>  return Ok(EscZ),
+        _   =>  return Ok(UnknownEscSeq),
+    }
+
+    // Mouse click
+    // TODO: support other mouse modes
+    let c2 = chan.recv()? as i32;
+    let mut x = chan.recv()? as i32 - 33;
+    let mut y = chan.recv()? as i32 - 33;
+    if x < 0 {
+        x += 255;
+    }
+    if y < 0 {
+        y += 255;
+    }
+
+    let p = pos(x,y);
+
+    let r = match c2 & 3 /* ignore modifier keys */ {
+        0 ... 2 =>  Click(p),
+        3       =>  ClickRelease(p),
+        _       =>  UnknownEscSeq,
+    };
+
+    Ok(r)
+}
+
+} // mod term
+
+
 
 
 /* DRAWING AND FRAME/SCREEN MANAGEMENT */
@@ -1349,7 +1298,9 @@ pub struct Drawinfo<'a> {
     pub is_active:          bool,
 }
 
+
 } // mod draw
+
 
 
 
@@ -1906,6 +1857,381 @@ impl Op {
 
 } // mod text
 
+
+
+
+/* CORE TYPE DEFINITION */
+
+// The core editor structure
+// TODO: add open buffer list, open views, open screens
+struct Editor {
+    window:         Pos,        // The dimensions of the editor and backend terminal window
+    mainscreen:     Rec,        // The screen area for displaying file content and menus.
+    footer:         Rec,
+    buffer:         Buffer,     // The one file loaded in the editor
+    view:           View,       // The one view of the one file loaded
+    screen:         Screen,     // The one screen associated to the one file loaded
+}
+
+#[derive(Debug)]
+enum Move {
+    Left,
+    Right,
+    Up,
+    Down,
+    Start,
+    End,
+}
+
+#[derive(Debug)]
+enum MovementMode {
+    Chars,
+    Lines,
+    Blocks,
+    Words,
+    Digits,
+    Numbers,
+    Paragraphs,
+    Parens,
+    Brackets,
+    Braces,
+    Selection,
+    Pages,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Mode {
+    Command(Commandstate),
+    Insert(InsertMode),
+    PendingInsert(InsertMode),
+    Exit,
+}
+
+
+// TODO: eliminate Commandstate and Insertstate and put the data inside the Mode?
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Commandstate {
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Insertstate {
+}
+
+// Left justified, fixed length strings.
+const MODE_COMMAND  : &'static str = "Command  ";
+const MODE_INSERT   : &'static str = "Insert   ";
+const MODE_PINSERT  : &'static str = "Insert?  ";
+const MODE_REPLACE  : &'static str = "Replace  ";
+const MODE_PREPLACE : &'static str = "Replace? ";
+const MODE_EXIT     : &'static str = "Exit     ";
+
+impl Mode {
+    const default_command_state : Mode = Mode::Command(Commandstate { });
+
+    fn footer_color(self) -> Colorcell {
+        use Mode::*;
+        match self {
+            Command(_)                              => CONF.color_mode_command,
+            Insert(InsertMode::Insert)              => CONF.color_mode_insert,
+            Insert(InsertMode::Replace)             => CONF.color_mode_replace,
+            PendingInsert(InsertMode::Insert)       => CONF.color_mode_insert,
+            PendingInsert(InsertMode::Replace)      => CONF.color_mode_replace,
+            Exit                                    => CONF.color_mode_exit,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        use Mode::*;
+        match self {
+            Command(_)                              => MODE_COMMAND,
+            Insert(InsertMode::Insert)              => MODE_INSERT,
+            Insert(InsertMode::Replace)             => MODE_REPLACE,
+            PendingInsert(InsertMode::Insert)       => MODE_PINSERT,
+            PendingInsert(InsertMode::Replace)      => MODE_PREPLACE,
+            Exit                                    => MODE_EXIT,
+        }
+    }
+
+    fn process_input(m: Mode, i: Input, e: &mut Editor) -> Re<Mode> {
+        if i == Input::Key(CTRL_C) {
+            // TODO: ask confirmation if dirty files
+            return Ok(Exit)
+        }
+
+        if i == Input::Resize {
+            logconsole("resize !");
+            return Ok(m)
+        }
+
+        use Mode::*;
+        let next = match m {
+            Command(mut state) => {
+                let op = Mode::input_to_command_op(i, e);
+                let next = state.do_command(op, e)?;
+                // should this instead be managed per operation in a more scoped way ?
+                e.view.update(&e.buffer);
+                next
+            }
+
+            Insert(mode) => {
+                let op = Mode::input_to_insert_op(mode, i, e);
+                Insertstate::do_insert(op, e)?
+            }
+
+            PendingInsert(mode) => {
+                e.buffer.snapshot(e.view.cursor);
+                e.buffer.prepare_insert(usize(e.view.cursor.y));
+                let insertmode = Insert(mode);
+                Mode::process_input(insertmode, i, e)?
+            }
+
+            Exit => {
+                panic!("cannot process input in Exit state")
+            }
+        };
+
+        // FUTURE: if the cursor moved position, update all other views of that file whose cursors is below lineno
+
+        // TODO: instead of aborting, handle input error processing, and check if any dirty files
+        // need saving !
+
+        Ok(next)
+    }
+
+    fn input_to_command_op(i: Input, e: &Editor) -> CommandOp {
+        use Input::*;
+        use CommandOp::*;
+        match i {
+            // TODO: more sophisticated cursor movement ...
+            // TODO: handle mouse click
+            Key('h')    => BufferMove(MoveOp::Movement(Move::Left)),
+            Key('j')    => BufferMove(MoveOp::Movement(Move::Down)),
+            Key('k')    => BufferMove(MoveOp::Movement(Move::Up)),
+            Key('l')    => BufferMove(MoveOp::Movement(Move::Right)),
+            Key(' ')    => BufferMove(MoveOp::Recenter),
+            Key(CTRL_D) => BufferMove(MoveOp::PageDown),
+            Key(CTRL_U) => BufferMove(MoveOp::PageUp),
+            Key(CTRL_H) => BufferMove(MoveOp::FileStart),
+            Key(CTRL_L) => BufferMove(MoveOp::FileEnd),
+            Key('o')    => BufferOp(e.view.cursor + pos(0,1),   BufferOpType::LineNew),
+            Key('O')    => BufferOp(e.view.cursor,              BufferOpType::LineNew),
+            Key('q')    => BufferOp(e.view.cursor,              BufferOpType::LineJoin),
+            Key(ENTER)  => BufferOp(e.view.cursor,              BufferOpType::LineBreak),
+            Key('d')    => BufferOp(e.view.cursor,              BufferOpType::LineDel),
+            Key('x')    => BufferOp(e.view.cursor,              BufferOpType::CharDelete),
+            Key(CTRL_X) => BufferOp(e.view.cursor,              BufferOpType::CharBackspace),
+            Key('u')    => BufferOp(e.view.cursor,              BufferOpType::Undo),
+            Key('r')    => BufferOp(e.view.cursor,              BufferOpType::Redo),
+            Key('\t')   => SwitchInsert,
+            Key(CTRL_R) => SwitchReplace,
+            Key('s')    => Save(format!("{}.tmp", e.view.filepath)),
+            Key('\\')   => ClearConsole,
+            //Key('b')
+            //            => panic!("BOOM !"),
+            //            //=> return er!("BOOM !"),
+            _ => Noop,
+        }
+    }
+
+    fn input_to_insert_op(mode: InsertMode, i: Input, e: &Editor) -> InsertOp {
+        use Input::*;
+        use InsertOpType::*;
+        let optype = match i {
+            Key(ESC) | EscZ                 => SwitchCommand,
+            Key(ENTER)                      => LineBreak,
+            Key(c) if c == DEL              => Backspace,
+            Key(c) if c == BACKSPACE        => Delete,
+            Key(c)                          => CharInsert(c),
+            _                               => Noop,
+        };
+
+        InsertOp {
+            cursor: e.view.cursor,
+            optype,
+            mode,
+        }
+    }
+}
+
+enum CommandOp {
+    BufferOp(Pos, BufferOpType),
+    BufferMove(MoveOp),
+    Save(String),
+    SwitchInsert,
+    SwitchReplace,
+    ClearConsole,
+    Noop,
+}
+
+enum MoveOp {
+    Movement(Move),
+    Recenter,
+    PageUp,
+    PageDown,
+    FileStart,
+    FileEnd,
+}
+
+enum BufferOpType {
+    LineDel,
+    LineNew,
+    LineJoin,   // TODO join line with separator !
+    LineBreak,
+    CharDelete,
+    CharBackspace,
+    Undo,
+    Redo,
+}
+
+enum InsertOpType {
+    LineBreak,
+    CharInsert(char),
+    Delete,
+    Backspace,
+    SwitchCommand,
+    Noop,
+}
+
+struct InsertOp {
+    cursor: Pos,
+    optype: InsertOpType,
+    mode:   InsertMode,
+}
+
+// Point to a place inside a Buffer
+struct Cursor<'a> {
+    buffer: &'a Buffer,
+}
+
+// Store states related to navigation in a given file.
+// All positions are in text coordinate.
+struct View {
+    filepath:           String,
+    relative_lineno:    bool,
+    movement_mode:      MovementMode,
+    show_token:         bool,
+    show_neighbor:      bool,
+    show_selection:     bool,
+    is_active:          bool,
+    cursor:             Pos,
+    cursor_memory:      Pos,
+    filearea:           Rec,
+    //selection:  Option<&[Selection]>
+}
+
+impl View {
+    fn mk_fileview(filepath: String, screensize: Pos) -> View {
+        View {
+            filepath,
+            relative_lineno:    CONF.relative_lineno,
+            movement_mode:      MovementMode::Chars,
+            show_token:         false,
+            show_neighbor:      false,
+            show_selection:     false,
+            is_active:          true,
+            cursor:             pos(0,0),
+            cursor_memory:      pos(0,0),
+            filearea:           screensize.rec(),
+        }
+    }
+
+// CLEANUP: move to Cursor impl
+    fn cursor_adjust(buffer: &Buffer, mut p: Pos) -> Pos {
+        p.y = min(p.y, buffer.nlines() - 1);
+        p.y = max(0, p.y);
+
+        // Right bound clamp pushes x to -1 for empty lines.
+        p.x = min(p.x, i32(buffer.line_len(usize(p.y))) - 1);
+        p.x = max(0, p.x);
+
+        p
+    }
+
+    // CHECKME: for cursor_next/prev, do I need to skip empty lines ?
+
+    fn cursor_next(buffer: &Buffer, p: Pos) -> Pos {
+        if p.x < i32(buffer.line_len(usize(p.y))) - 1 {
+            return p + pos(1,0)
+        }
+
+        if p.y < buffer.nlines() - 1 {
+            return pos(0, p.y + 1)
+        }
+
+        p // Hit end of file
+    }
+
+    fn cursor_prev(buffer: &Buffer, p: Pos) -> Pos {
+        if p.x > 0 {
+            return p - pos(1,0)
+        }
+
+        if p.y > 0 {
+            let y = p.y - 1;
+            let x = max(0, i32(buffer.line_len(usize(y))) - 1);
+            return pos(x, y)
+        }
+
+        p // Hit beggining of file
+    }
+
+    fn update(&mut self, buffer: &Buffer) {
+        if buffer.nlines() == 0 {
+            return;
+        }
+
+        self.cursor = View::cursor_adjust(buffer, self.cursor);
+
+        // text range adjustment
+        {
+            let p = self.cursor;
+
+            let mut dx = 0;
+            let mut dy = 0;
+
+            if p.y < self.filearea.min.y {
+                dy = p.y - self.filearea.min.y;
+            }
+            if self.filearea.max.y <= p.y {
+                dy = p.y + 1 - self.filearea.max.y;
+            }
+            if p.x < self.filearea.min.x {
+                dx = p.x - self.filearea.min.x;
+            }
+            if self.filearea.max.x <= p.x {
+                dx = p.x + 1 - self.filearea.max.x;
+            }
+
+            self.filearea = self.filearea + pos(dx, dy);
+        }
+    }
+
+    fn recenter(&mut self, buffer: &Buffer) {
+        let size = self.filearea.size();
+        let y = max(0, self.cursor.y - size.y / 2);
+        self.filearea = pos(self.cursor.x, y).extrude(size);
+    }
+
+    fn go_page_down(&mut self, buffer: &Buffer) {
+        let y = min(buffer.nlines() - 1, self.cursor.y + 50);
+        self.cursor = pos(self.cursor.x, y);
+    }
+
+    fn go_page_up(&mut self, buffer: &Buffer) {
+        let y = max(0, self.cursor.y - 50);
+        self.cursor = pos(self.cursor.x, y);
+    }
+
+    fn go_file_start(&mut self, buffer: &Buffer) {
+        self.cursor = pos(self.cursor.x, 0);
+    }
+
+    fn go_file_end(&mut self, buffer: &Buffer) {
+        self.cursor = pos(self.cursor.x, buffer.nlines() - 1);
+    }
+}
+
+
 // TODO: find better place
 fn update_buffer(r: text::Opresult, e: &mut Editor) {
     use text::Opresult::*;
@@ -2186,317 +2512,3 @@ impl Editor {
         // TODO
     }
 }
-
-
-/* TERMINAL BINDINGS */
-mod term {
-
-
-use std::fmt;
-use std::cmp::max;
-use std::cmp::min;
-use std::error::Error;
-use std::io;
-use std::io::Read;
-use std::io::Write;
-use std::panic;
-use std::sync::mpsc::Receiver;
-use std::sync::mpsc::SyncSender;
-
-use conf::CONF;
-use core::*;
-use util::*;
-
-
-#[repr(C)]
-struct TermWinsize {
-    ws_row:     u16,
-    ws_col:     u16,
-    ws_xpixel:  u16,
-    ws_ypixel:  u16,
-}
-
-
-#[link(name = "term", kind = "static")]
-extern "C" {
-    fn terminal_get_size() -> TermWinsize;
-    fn terminal_restore();
-    fn terminal_set_raw() -> i32;
-    fn read_1B() -> i32;
-}
-
-
-// Global variable for ensuring terminal restore happens once exactly.
-static mut is_raw : bool = false;
-
-
-// Empty object used to safely control terminal raw mode and properly exit raw mode at scope exit.
-pub struct Term {
-}
-
-impl Drop for Term {
-    fn drop(&mut self) {
-        Term::restore();
-    }
-}
-
-impl Term {
-    pub fn size() -> Pos {
-        unsafe {
-            let ws = terminal_get_size();
-            pos(ws.ws_col as i32, ws.ws_row as i32)
-        }
-    }
-
-    pub fn set_raw() -> Re<Term> {
-        if !CONF.no_raw_mode {
-            let stdout = io::stdout();
-            let mut h = stdout.lock();
-            h.write(b"\x1b[s")?;            // save cursor
-            h.write(b"\x1b[?47h")?;         // go offscreen
-            h.write(b"\x1b[?1000h")?;       // get mouse event
-            h.write(b"\x1b[?1002h")?;       // track mouse event
-            h.write(b"\x1b[?1004h")?;       // get focus event
-            h.flush()?;
-
-            unsafe {
-                let _ = terminal_set_raw();
-                is_raw = true;
-            }
-
-            // Ensure terminal is restored to default whenever a panic happens.
-            let std_panic_hook = panic::take_hook();
-            panic::set_hook(Box::new(move |panicinfo| {
-                Term::restore();
-                std_panic_hook(panicinfo);
-            }));
-        }
-
-        Ok(Term { })
-    }
-
-    fn restore() {
-        unsafe {
-            if CONF.no_raw_mode || !is_raw {
-                return
-            }
-        }
-
-        let stdout = io::stdout();
-        let mut h = stdout.lock();
-        h.write(b"\x1b[?1004l").unwrap();   // stop focus event
-        h.write(b"\x1b[?1002l").unwrap();   // stop mouse tracking
-        h.write(b"\x1b[?1000l").unwrap();   // stop mouse event
-        h.write(b"\x1b[?47l").unwrap();     // go back to main screen
-        h.write(b"\x1b[u").unwrap();        // restore cursor
-        h.flush().unwrap();
-
-        unsafe {
-            terminal_restore();
-            is_raw = false;
-        }
-    }
-}
-
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Input {
-    Noinput,
-    Error,
-    UnknownEscSeq,
-    Key(char),
-    Click(Pos),
-    ClickRelease(Pos),
-    EscZ,               // shift + tab -> "\x1b[Z"
-    Resize,
-}
-
-impl fmt::Display for Input {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use Input::*;
-        match self {
-            Noinput                         => f.write_str(&"Noinput"),
-            Error                           => f.write_str(&"Error"),
-            UnknownEscSeq                   => f.write_str(&"Unknown"),
-            Key(c)                          => Input::fmt_key_name(*c, f),
-            Click(Pos { x, y })             => write!(f, "click ({},{})'", y, x),
-            ClickRelease(Pos { x, y })      => write!(f, "unclick ({},{})'", y, x),
-            EscZ                            => f.write_str(&"EscZ"),
-            Resize                          => f.write_str(&"Resize"),
-        }
-    }
-}
-
-impl Input {
-    // return Some(name) for keys with a special description
-    fn key_descr(c: char) -> Option<&'static str> {
-        let r = match c {
-            CTRL_AT             => &"^@",
-            CTRL_A              => &"^A",
-            CTRL_B              => &"^B",
-            CTRL_C              => &"^C",
-            CTRL_D              => &"^D",
-            CTRL_E              => &"^E",
-            CTRL_F              => &"^F",
-            CTRL_G              => &"^G",
-            BACKSPACE           => &"Backspace",
-            TAB                 => &"TAB",
-            CTRL_J              => &"^J",
-            CTRL_K              => &"^K",
-            CTRL_L              => &"^L",
-            ENTER               => &"Enter",
-            CTRL_N              => &"^N",
-            CTRL_O              => &"^O",
-            CTRL_P              => &"^P",
-            CTRL_Q              => &"^Q",
-            CTRL_R              => &"^R",
-            CTRL_S              => &"^S",
-            CTRL_T              => &"^T",
-            CTRL_U              => &"^U",
-            CTRL_V              => &"^V",
-            CTRL_W              => &"^W",
-            CTRL_X              => &"^X",
-            CTRL_Y              => &"^Y",
-            CTRL_Z              => &"^Z",
-            ESC                 => &"Esc",
-            CTRL_BACKSLASH      => &"^\\",
-            CTRL_RIGHT_BRACKET  => &"^]",
-            CTRL_CARET          => &"^^",
-            CTRL_UNDERSCORE     => &"^_",
-            SPACE               => &"Space",
-            DEL                 => &"Del",
-            _                   => return None,
-        };
-        Some(r)
-    }
-
-    fn fmt_key_name(c: char, f: &mut fmt::Formatter) -> fmt::Result {
-        match Input::key_descr(c) {
-            Some(s) => f.write_str(s),
-            None    => write!(f, "{}", c),
-        }
-    }
-}
-
-
-pub const CTRL_AT               : char = '\x00';
-pub const CTRL_A                : char = '\x01';
-pub const CTRL_B                : char = '\x02';
-pub const CTRL_C                : char = '\x03';
-pub const CTRL_D                : char = '\x04';
-pub const CTRL_E                : char = '\x05';
-pub const CTRL_F                : char = '\x06';
-pub const CTRL_G                : char = '\x07';
-pub const CTRL_H                : char = '\x08';
-pub const CTRL_I                : char = '\x09';
-pub const CTRL_J                : char = '\x0a';
-pub const CTRL_K                : char = '\x0b';
-pub const CTRL_L                : char = '\x0c';
-pub const CTRL_M                : char = '\x0d';
-pub const CTRL_N                : char = '\x0e';
-pub const CTRL_O                : char = '\x0f';
-pub const CTRL_P                : char = '\x10';
-pub const CTRL_Q                : char = '\x11';
-pub const CTRL_R                : char = '\x12';
-pub const CTRL_S                : char = '\x13';
-pub const CTRL_T                : char = '\x14';
-pub const CTRL_U                : char = '\x15';
-pub const CTRL_V                : char = '\x16';
-pub const CTRL_W                : char = '\x17';
-pub const CTRL_X                : char = '\x18';
-pub const CTRL_Y                : char = '\x19';
-pub const CTRL_Z                : char = '\x1a';
-pub const CTRL_LEFT_BRACKET     : char = '\x1b';
-pub const CTRL_BACKSLASH        : char = '\x1c';
-pub const CTRL_RIGHT_BRACKET    : char = '\x1d';
-pub const CTRL_CARET            : char = '\x1e';
-pub const CTRL_UNDERSCORE       : char = '\x1f';
-pub const SPACE                 : char = '\x20';
-pub const DEL                   : char = '\x7f';
-pub const ESC                   : char = CTRL_LEFT_BRACKET;
-pub const BACKSPACE             : char = CTRL_H;
-pub const TAB                   : char = CTRL_I;
-pub const LINE_FEED             : char = CTRL_J;
-pub const VTAB                  : char = CTRL_K;
-pub const NEW_PAGE              : char = CTRL_L;
-pub const ENTER                 : char = CTRL_M;
-
-// Special code
-pub const RESIZE                : char = 255 as char; //'\xff';
-
-
-pub fn is_printable(c : char) -> bool {
-    SPACE <= c && c < DEL
-}
-
-pub fn push_char(chan: &SyncSender<char>) {
-    let mut stdin = io::stdin();
-    let mut buf = [0;1];
-    // TODO: handle interrupts when errno == EINTR
-    // TODO: support unicode !
-    loop {
-        let n = stdin.read(&mut buf).unwrap(); // TODO: pass error through the channel ?
-        if n == 1 {
-            let c = buf[0];
-            let d = match Input::key_descr(c as char) {
-                Some(s) => logd(&format!("input: {}/{}\n", c, s)),
-                None    => logd(&format!("input: {}/{}\n", c, c as char)),
-            };
-            chan.send(buf[0] as char).unwrap();
-        }
-    }
-}
-
-pub fn pull_input(chan: &Receiver<char>) -> Re<Input> {
-    use Input::*;
-    use std::sync::mpsc::TryRecvError::*;
-
-    let c = chan.recv()?;
-
-    if c == RESIZE {
-        return Ok(Resize);
-    }
-
-    if c != ESC {
-        return Ok(Key(c))
-    }
-
-    // Escape: if no more char immediately available, return ESC, otherwise parse an escape sequence
-
-    match chan.try_recv() {
-        Ok(c) if c == '['       => (),                          // Escape sequence: continue parsing
-        Ok(c)                   => return Ok(UnknownEscSeq),    // Error while parsing: bail out
-        Err(Empty)              => return Ok(Key(ESC)),         // Nothing more: this was just an escape key
-        Err(e)                  => return er!(e.description()),
-    }
-
-    match chan.recv()? {
-        'M' =>  (), // Mouse click, handled below
-        'Z' =>  return Ok(EscZ),
-        _   =>  return Ok(UnknownEscSeq),
-    }
-
-    // Mouse click
-    // TODO: support other mouse modes
-    let c2 = chan.recv()? as i32;
-    let mut x = chan.recv()? as i32 - 33;
-    let mut y = chan.recv()? as i32 - 33;
-    if x < 0 {
-        x += 255;
-    }
-    if y < 0 {
-        y += 255;
-    }
-
-    let p = pos(x,y);
-
-    let r = match c2 & 3 /* ignore modifier keys */ {
-        0 ... 2 =>  Click(p),
-        3       =>  ClickRelease(p),
-        _       =>  UnknownEscSeq,
-    };
-
-    Ok(r)
-}
-
-} // mod term
