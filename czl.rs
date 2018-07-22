@@ -2210,10 +2210,10 @@ use util::*;
 
 #[repr(C)]
 struct TermWinsize {
-    ws_row: u16,
-    ws_col: u16,
-    ws_xpixel: u16,
-    ws_ypixel: u16,
+    ws_row:     u16,
+    ws_col:     u16,
+    ws_xpixel:  u16,
+    ws_ypixel:  u16,
 }
 
 
@@ -2277,12 +2277,9 @@ impl Term {
 
     fn restore() {
         unsafe {
-            if !is_raw {
+            if CONF.no_raw_mode || !is_raw {
                 return
             }
-        }
-        if CONF.no_raw_mode {
-            return
         }
 
         let stdout = io::stdout();
@@ -2302,18 +2299,16 @@ impl Term {
 }
 
 
-/* KEY INPUT HANDLING */
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Input {
     Noinput,
+    Error,
+    UnknownEscSeq,
     Key(char),
     Click(Pos),
     ClickRelease(Pos),
-    UnknownEscSeq,
-    EscZ,       // shift + tab -> "\x1b[Z"
+    EscZ,               // shift + tab -> "\x1b[Z"
     Resize,
-    Error,
 }
 
 impl fmt::Display for Input {
@@ -2321,18 +2316,19 @@ impl fmt::Display for Input {
         use Input::*;
         match self {
             Noinput                         => f.write_str(&"Noinput"),
-            UnknownEscSeq                   => f.write_str(&"Unknown"),
-            EscZ                            => f.write_str(&"EscZ"),
-            Resize                          => f.write_str(&"Resize"),
             Error                           => f.write_str(&"Error"),
+            UnknownEscSeq                   => f.write_str(&"Unknown"),
             Key(c)                          => Input::fmt_key_name(*c, f),
             Click(Pos { x, y })             => write!(f, "click ({},{})'", y, x),
             ClickRelease(Pos { x, y })      => write!(f, "unclick ({},{})'", y, x),
+            EscZ                            => f.write_str(&"EscZ"),
+            Resize                          => f.write_str(&"Resize"),
         }
     }
 }
 
 impl Input {
+    // return Some(name) for keys with a special description
     fn key_descr(c: char) -> Option<&'static str> {
         let r = match c {
             CTRL_AT             => &"^@",
@@ -2425,24 +2421,13 @@ pub const VTAB                  : char = CTRL_K;
 pub const NEW_PAGE              : char = CTRL_L;
 pub const ENTER                 : char = CTRL_M;
 
+// Special code
 pub const RESIZE                : char = 255 as char; //'\xff';
+
 
 pub fn is_printable(c : char) -> bool {
     SPACE <= c && c < DEL
 }
-
-//fn read_char() -> Re<char> {
-//    let c;
-//    unsafe {
-//        c = read_1B();
-//    }
-//    if c < 0 {
-//        return er!(format!("error reading char ! errno={}", -c));
-//    }
-//
-//    Ok(c as u8 as char)
-//}
-
 
 pub fn push_char(chan: &SyncSender<char>) {
     let mut stdin = io::stdin();
