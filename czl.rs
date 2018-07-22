@@ -35,8 +35,8 @@ macro_rules! check {
 
 /*
  * Buffer operation migration
- *  - CommandOps: migrate to Opresult,
- *  - CommandOps: regroup parameters like cursor and eliminate e.view
+ *  - CommandOps/BufferOps: always take a snapshot and only push the snapshot if Opresult is not
+ *  noop
  *  - regroup CommandOps on buffer and InsertOps ?
  *  - CommandOps: composite ops
  *      join line range,
@@ -1567,7 +1567,12 @@ impl Buffer {
         shift(line, x)
     }
 
-    pub fn line_del(&mut self, lineno: usize) {
+    pub fn line_del(&mut self, p: Pos) -> Opresult {
+        if self.nlines() == 0 {
+            return Opresult::Noop
+        }
+
+        let lineno = usize(p.y);
         check!(lineno < self.lines.len());
 
         self.do_op(Op {
@@ -1575,19 +1580,25 @@ impl Buffer {
             line:           Range { start: 0, stop: 0 },
             op_type:        Optype::Del,
         });
+
+        Opresult::Change(p)
     }
 
     fn line_empty(&mut self) -> Range {
         range(self.text.len(), self.text.len())
     }
 
-    pub fn line_new(&mut self, lineno: usize) {
+    pub fn line_new(&mut self, p: Pos) -> Opresult {
+        let lineno = usize(p.y);
         let line = self.line_empty();
         let op = Op { lineno, line, op_type:Optype::Ins };
         self.do_op(op);
+
+        Opresult::Change(p)
     }
 
-    pub fn line_join(&mut self, lineno: usize) {
+    pub fn line_join(&mut self, p: Pos) -> Opresult {
+        let lineno = usize(p.y);
         let start = self.text.len();
 
         let line1 = self.lines[lineno];
@@ -1602,7 +1613,9 @@ impl Buffer {
             line:       line,
             op_type:    Optype::Rep,
         });
-        self.line_del(lineno + 1);
+        self.line_del(p + pos(0,1));
+
+        Opresult::Change(p)
     }
 
     pub fn line_break(&mut self, p: Pos) -> Opresult {
@@ -1686,15 +1699,15 @@ impl Buffer {
     }
 
     pub fn del(&mut self, cursor: Pos) -> Opresult {
+        // CLEANUP: try to return the result of line_del, line_join, ...
         let r = Opresult::Change(cursor);
 
-        let colno = usize(cursor.x);
-        let lineno = usize(cursor.y);
+        let (colno, lineno) = cursor.usize();
         let len = self.line_len(lineno);
 
         // current line is empty
         if len == 0 {
-            self.line_del(lineno);
+            self.line_del(cursor);
             return Opresult::Change(cursor)
         }
 
@@ -1709,14 +1722,14 @@ impl Buffer {
         if colno == len - 1 {
             // next line is empty
             if self.line_len(lineno + 1) == 0 {
-                self.line_del(lineno + 1);
+                self.line_del(cursor + pos(0,1));
                 return Opresult::Change(cursor)
             }
 
             // else join lines
             // BUG: use a line op here
             self.lines[lineno].stop -= 1;
-            self.line_join(lineno);
+            self.line_join(cursor);
             return Opresult::Change(cursor)
         }
 
@@ -1726,6 +1739,7 @@ impl Buffer {
     }
 
     pub fn backspace(&mut self, cursor: Pos) -> Opresult {
+        // CLEANUP: try to return the result of line_del, line_join, ...
         // first line, first char: noop
         if cursor == pos(0,0) {
             return Opresult::Noop
@@ -1743,19 +1757,19 @@ impl Buffer {
 
         // current line is empty
         if len == 0 {
-            self.line_del(lineno);
+            self.line_del(cursor);
             return r
         }
 
         // beggining of line and previous line is empty
         if cursor.x == 0 && self.line_len(lineno - 1) == 0 {
-            self.line_del(lineno - 1);
+            self.line_del(cursor - pos(0,1));
             return r
         }
 
         // beggining of line: join
         if cursor.x == 0 {
-            self.line_join(lineno - 1);
+            self.line_join(cursor - pos(0,1));
             return r
         }
 
@@ -1764,26 +1778,27 @@ impl Buffer {
         r
     }
 
-    pub fn undo(&mut self) -> Option<Pos> {
-        match self.snapshots.pop() {
-            Some(s) => {
-                for i in (s.op_cursor..self.op_cursor).rev() {
-                    let mut op = self.op_history[i];
-                    op.undo_op(self);
-                }
-                self.op_cursor = s.op_cursor;
-                // TODO: introduce text cursor and adjust it here
-                // TODO: introduce line cursor and adjust it here
-                self.dirty = s.dirty;
-                Some(s.cursor)
-            }
-            None => None,
+    pub fn undo(&mut self) -> Opresult {
+        if self.snapshots.is_empty() {
+            return Opresult::Noop
         }
+
+        let s = self.snapshots.pop().unwrap();
+        for i in (s.op_cursor..self.op_cursor).rev() {
+            let mut op = self.op_history[i];
+            op.undo_op(self);
+        }
+
+        // CLEANUP: this should be done as an Opresult ??
+        self.op_cursor = s.op_cursor;
+        // TODO: introduce text cursor and adjust it here
+        // TODO: introduce line cursor and adjust it here
+        Opresult::Change(s.cursor)
     }
 
-    pub fn redo(&mut self) -> Option<Pos> {
+    pub fn redo(&mut self) -> Opresult {
         if self.snapshot_next == self.snapshots.len() {
-            return None
+            return Opresult::Noop
         }
 
         let s = self.snapshots[self.snapshot_next];
@@ -1793,13 +1808,12 @@ impl Buffer {
             op.do_op(self);
         }
 
+        // CLEANUP: this should be done as an Opresult ?
         // TODO adjust text and line cursors
-
         self.dirty = s.dirty;
         self.snapshot_next += 1;
         self.op_cursor = s.op_cursor;
-
-        Some(s.cursor)
+        Opresult::Change(s.cursor)
     }
 
     fn do_op(&mut self, mut op: Op) {
@@ -1965,61 +1979,48 @@ impl Commandstate {
     }
 
     fn do_buffer_op(&mut self, p: Pos, op: BufferOpType, e: &mut Editor) {
-        // TODO collect Opresult and apply it for all cases
         use BufferOpType::*;
-        match op {
+        let opresult = match op {
             LineDel => {
-                if e.buffer.nlines() > 0 {
-                    let lineno = usize(p.y);
-                    e.buffer.snapshot(e.view.cursor);
-                    e.buffer.line_del(lineno);
-                }
+                e.buffer.snapshot(p);
+                e.buffer.line_del(p)
             }
 
             LineNew => {
-                let lineno = usize(p.y);
-                e.buffer.snapshot(e.view.cursor);
-                e.buffer.line_new(lineno);
-                e.view.cursor = pos(0, p.y);
+                e.buffer.snapshot(p);
+                e.buffer.line_new(p)
             }
 
             LineJoin => {
-                e.buffer.snapshot(e.view.cursor);
-                e.buffer.line_join(usize(p.y));
+                e.buffer.snapshot(p);
+                e.buffer.line_join(p)
             }
 
             LineBreak => {
-                e.buffer.snapshot(e.view.cursor);
-                let r = e.buffer.line_break(p);
-                update_buffer(r, e);
+                e.buffer.snapshot(p);
+                e.buffer.line_break(p)
             }
 
             CharDelete => {
-                e.buffer.snapshot(e.view.cursor);
-                let r = e.buffer.del(p);
-                update_buffer(r, e);
+                e.buffer.snapshot(p);
+                e.buffer.del(p)
             }
 
             CharBackspace => {
-                e.buffer.snapshot(e.view.cursor);
-                let r = e.buffer.backspace(p);
-                update_buffer(r, e);
+                e.buffer.snapshot(p);
+                e.buffer.backspace(p)
             }
 
             Undo => {
-                match e.buffer.undo() {
-                    Some(p) => e.view.cursor = p,
-                    None => (),
-                }
+                e.buffer.undo()
             }
 
             Redo => {
-                match e.buffer.redo() {
-                    Some(p) => e.view.cursor = p,
-                    None => (),
-                }
+                e.buffer.redo()
             }
-        }
+        };
+
+        update_buffer(opresult, e);
     }
 }
 
