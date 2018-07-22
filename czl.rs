@@ -54,12 +54,13 @@ macro_rules! check {
  *  - grep move
  *  - cursor previous points and cursor markers
  *  - ctags support
+ *  - support tab character and autodetect tab expansion ?
+ *  - add a special input for forcing a tab insert
  *
  * TODOs and cleanups
  *  - PERF add clear in sub rec to framebuffer and use Draw in Drawinfo to redraw only what's needed
  *  - fuzzer
  *  - handle resize
- *  - tab expansion
  *  - utf8 support: Range and Filebuffer, Input, ... don't wait too much
  */
 
@@ -107,6 +108,8 @@ pub const CONF : Config = Config {
     color_mode_replace:     Colorcell { fg: Color::BoldWhite, bg: Color::Magenta },
     color_mode_exit:        Colorcell { fg: Color::Magenta, bg: Color::Magenta },
 
+    tab_expansion:          4,
+
     logfile:                &"/tmp/czl.log",
 };
 
@@ -137,6 +140,8 @@ pub struct Config {
     pub color_mode_insert:      Colorcell,
     pub color_mode_replace:     Colorcell,
     pub color_mode_exit:        Colorcell,
+
+    pub tab_expansion:          i32,
 
     pub logfile:                &'static str,
 }
@@ -2022,6 +2027,7 @@ impl Mode {
         let optype = match i {
             Key(ESC) | EscZ                 => SwitchCommand,
             Key(ENTER)                      => LineBreak,
+            Key(TAB)                        => TabInsert,
             Key(c) if c == DEL              => Backspace,
             Key(c) if c == BACKSPACE        => Delete,
             Key(c)                          => CharInsert(c),
@@ -2068,6 +2074,7 @@ enum BufferOpType {
 
 enum InsertOpType {
     LineBreak,
+    TabInsert,
     CharInsert(char),
     Delete,
     Backspace,
@@ -2343,6 +2350,16 @@ impl Insertstate {
         let opresult = match op.optype {
             LineBreak => {
                 e.buffer.line_break(op.cursor)
+            }
+
+            TabInsert => {
+                let n = CONF.tab_expansion - op.cursor.x % CONF.tab_expansion;
+                let mut p = op.cursor;
+                for _ in 0..n {
+                    e.buffer.char_insert(op.mode, p, ' ');
+                    p = p + pos(1,0);
+                }
+                Opresult::Change(p)
             }
 
             CharInsert(c) if !is_printable(c) => {
