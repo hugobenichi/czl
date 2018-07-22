@@ -1,19 +1,9 @@
 #![allow(dead_code)]
 #![allow(non_upper_case_globals)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(unused_macros)]
 
 
 use std::cmp::max;
 use std::cmp::min;
-use std::fmt;
-use std::fs;
-use std::io;
-use std::io::Read;
-use std::io::Write;
-use std::mem::replace;
-use std::sync::mpsc;
 
 use conf::*;
 use core::*;
@@ -75,7 +65,7 @@ macro_rules! check {
 
 
 fn main() {
-    let term = Term::set_raw().unwrap();
+    let _term = Term::set_raw().unwrap();
 
     open_logfile(&CONF.logfile).unwrap();
 
@@ -161,8 +151,7 @@ pub struct Config {
 mod core {
 
 
-use fmt;
-use std;
+use std::fmt;
 use std::ops::Add;
 use std::ops::AddAssign;
 use std::ops::Neg;
@@ -414,7 +403,6 @@ mod util {
 
 
 use std;
-use std::cmp::max;
 use std::cmp::min;
 use std::error::Error;
 use std::io;
@@ -664,8 +652,6 @@ mod term {
 
 
 use std::fmt;
-use std::cmp::max;
-use std::cmp::min;
 use std::error::Error;
 use std::io;
 use std::io::Read;
@@ -909,7 +895,7 @@ pub fn push_char(chan: &SyncSender<char>) {
         let n = stdin.read(&mut buf).unwrap(); // TODO: pass error through the channel ?
         if n == 1 {
             let c = buf[0];
-            let d = match Input::key_descr(c as char) {
+            match Input::key_descr(c as char) {
                 Some(s) => logd(&format!("input: {}/{}\n", c, s)),
                 None    => logd(&format!("input: {}/{}\n", c, c as char)),
             };
@@ -936,7 +922,7 @@ pub fn pull_input(chan: &Receiver<char>) -> Re<Input> {
 
     match chan.try_recv() {
         Ok(c) if c == '['       => (),                          // Escape sequence: continue parsing
-        Ok(c)                   => return Ok(UnknownEscSeq),    // Error while parsing: bail out
+        Ok(_)                   => return Ok(UnknownEscSeq),    // Error while parsing: bail out
         Err(Empty)              => return Ok(Key(ESC)),         // Nothing more: this was just an escape key
         Err(e)                  => return er!(e.description()),
     }
@@ -985,11 +971,10 @@ use std::io;
 use std::io::Write;
 use std::mem::replace;
 
-use util::*;
 use conf::CONF;
-use core::*;
-use term::*;
 use text::Buffer;
+use util::*;
+use core::*;
 
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1062,7 +1047,7 @@ impl Framebuffer {
         let mut x0 = xbase + max(0, area.x0()) as usize;
         let mut x1 = xbase + min(area.x1(), self.window.x) as usize;
 
-        for i in y0..y1 {
+        for _ in y0..y1 {
             fill(&mut self.fg[x0..x1], colorcode(colors.fg));
             fill(&mut self.bg[x0..x1], colorcode(colors.bg));
             x0 += dx;
@@ -1434,7 +1419,7 @@ impl Buffer {
 
         let mut a = 0;
         let newline = '\n' as u8;
-        for (i, line) in text.split(|c| *c == newline).enumerate() {
+        for (_, line) in text.split(|c| *c == newline).enumerate() {
             let l = line.len();
             let b = a + l;
             let mut r = range(a, b);
@@ -1651,8 +1636,6 @@ impl Buffer {
 
     pub fn del(&mut self, cursor: Pos) -> Opresult {
         // CLEANUP: try to return the result of line_del, line_join, ...
-        let r = Opresult::Change(cursor);
-
         let (colno, lineno) = cursor.usize();
         let len = self.line_len(lineno);
 
@@ -2206,10 +2189,11 @@ impl View {
         }
     }
 
-    fn recenter(&mut self, buffer: &Buffer) {
+    fn recenter(&mut self, _buffer: &Buffer) {
         let size = self.filearea.size();
         let y = max(0, self.cursor.y - size.y / 2);
-        self.filearea = pos(self.cursor.x, y).extrude(size);
+        // TODO: consider horizontal recenter too
+        self.filearea = pos(0, y).extrude(size);
     }
 
     fn go_page_down(&mut self, buffer: &Buffer) {
@@ -2217,12 +2201,12 @@ impl View {
         self.cursor = pos(self.cursor.x, y);
     }
 
-    fn go_page_up(&mut self, buffer: &Buffer) {
+    fn go_page_up(&mut self, _buffer: &Buffer) {
         let y = max(0, self.cursor.y - 50);
         self.cursor = pos(self.cursor.x, y);
     }
 
-    fn go_file_start(&mut self, buffer: &Buffer) {
+    fn go_file_start(&mut self, _buffer: &Buffer) {
         self.cursor = pos(self.cursor.x, 0);
     }
 
@@ -2251,7 +2235,6 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
 impl Commandstate {
     fn do_command(&mut self, op: CommandOp, e: &mut Editor) -> Re<Mode> {
         use CommandOp::*;
-        use MoveOp::*;
         use Mode::*;
         match op {
             BufferMove(m) =>
@@ -2278,7 +2261,7 @@ impl Commandstate {
             Noop => (),
         }
 
-        Ok(Command(replace(self, Commandstate { })))
+        Ok(Command(Commandstate { }))
     }
 
     fn do_buffer_move(&mut self, op: MoveOp, e: &mut Editor) {
@@ -2432,7 +2415,7 @@ impl Editor {
 
         e.refresh_screen(&mut f, &m)?;
 
-        let (send, recv) = mpsc::sync_channel(32);
+        let (send, recv) = std::sync::mpsc::sync_channel(32);
 
         std::thread::spawn(move || {
             push_char(&send);
@@ -2443,7 +2426,7 @@ impl Editor {
             let i = pull_input(&recv)?;
             logconsole(&format!("input: {}", i));
 
-            let frame_time = Scopeclock::measure("last frame");     // caveat: displayed on next frame only
+            let _frame_time = Scopeclock::measure("last frame");     // caveat: displayed on next frame only
 
             m = Mode::process_input(m, i, &mut e)?;
 
@@ -2456,7 +2439,7 @@ impl Editor {
     fn refresh_screen(&mut self, framebuffer: &mut Framebuffer, mode: &Mode) -> Re<()> {
         // main screen
         {
-            let draw_time = Scopeclock::measure("draw");
+            let _draw_time = Scopeclock::measure("draw");
 
             let header = format!("{}{} {:?}",
                     self.view.filepath,
@@ -2483,7 +2466,7 @@ impl Editor {
 
         // renter frame to terminal
         {
-            let push_frame_time = Scopeclock::measure("render");
+            let _push_frame_time = Scopeclock::measure("render");
 
             framebuffer.render()?;
             if !CONF.retain_frame {
