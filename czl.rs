@@ -652,6 +652,33 @@ impl Debugconsole {
 
 
 
+mod ioutil {
+
+use std::fs;
+use util::*;
+use std::io::Read;
+
+pub fn file_load(filename: &str) -> Re<Vec<u8>> {
+    let fileinfo = fs::metadata(filename)?;
+    let size = fileinfo.len() as usize;
+
+    let mut buf = vec![0; size];
+    let mut f = fs::File::open(filename)?;
+
+    let nread = f.read(&mut buf)?;
+    if nread != size {
+        return er!("not enough bytes");
+    }
+
+    Ok(buf)
+}
+
+
+} // mod ioutil
+
+
+
+
 /* TERMINAL BINDINGS */
 mod term {
 
@@ -1300,12 +1327,12 @@ mod text {
 
 use std::cmp::min;
 use std::fs;
-use std::io::Read;
 use std::io::Write;
 use std::mem::swap;
 
 use core::*;
 use util::*;
+use ioutil;
 
 
 #[cfg(windows)]
@@ -1398,7 +1425,6 @@ impl <'a> Iterator for BufferIter<'a> {
     }
 }
 
-// TODO: this should implement array bracket notation ?
 impl Buffer {
 
     pub fn iter(&self, offset: Pos, want_nlines: i32) -> BufferIter {
@@ -1415,11 +1441,12 @@ impl Buffer {
     }
 
     pub fn from_file(path: &str) -> Re<Buffer> {
-        let text = file_load(path)?;
+        let text = ioutil::file_load(path)?;
         Ok(Buffer::from_text(text))
     }
 
-    fn from_text(text: Vec<u8>) -> Buffer {
+    pub fn from_text(text: Vec<u8>) -> Buffer {
+
         let mut lines = Vec::new();
 
         let mut a = 0;
@@ -1516,7 +1543,7 @@ impl Buffer {
         let lineno = usize(p.y);
         check!(lineno < self.lines.len());
 
-        self.do_op(Op {
+        self.do_single_op(Op {
             lineno,
             line:           Range { start: 0, stop: 0 },
             op_type:        Optype::Del,
@@ -1533,7 +1560,7 @@ impl Buffer {
         let lineno = usize(p.y);
         let line = self.line_empty();
         let op = Op { lineno, line, op_type:Optype::Ins };
-        self.do_op(op);
+        self.do_single_op(op);
 
         Opresult::Change(p)
     }
@@ -1549,7 +1576,7 @@ impl Buffer {
 
         let line = range(start, start + line1.len() + line2.len());
 
-        self.do_op(Op {
+        self.do_single_op(Op {
             lineno:     lineno,
             line:       line,
             op_type:    Optype::Rep,
@@ -1563,12 +1590,12 @@ impl Buffer {
         let (colno, lineno) = p.usize();
         let (left, right) = self.line_get(lineno).cut(colno);
 
-        self.do_op(Op {
+        self.do_single_op(Op {
             lineno:     lineno,
             line:       left,
             op_type:    Optype::Rep,
         });
-        self.do_op(Op {
+        self.do_single_op(Op {
             lineno:     lineno + 1,
             line:       right,
             op_type:    Optype::Ins,
@@ -1596,7 +1623,7 @@ impl Buffer {
     pub fn prepare_insert(&mut self, lineno: usize) {
         let line = self.cloneline(lineno);
         let op = Op { lineno, line, op_type: Optype::Rep };
-        self.do_op(op);
+        self.do_single_op(op);
     }
 
     pub fn char_insert(&mut self, mode: InsertMode, p: Pos, c: char) -> Opresult {
@@ -1725,7 +1752,7 @@ impl Buffer {
         let s = self.snapshots.pop().unwrap();
         for i in (s.op_cursor..self.op_cursor).rev() {
             let mut op = self.op_history[i];
-            op.undo_op(self);
+            self.undo_op(&mut op);
         }
 
         // CLEANUP: this should be done as an Opresult ??
@@ -1744,7 +1771,7 @@ impl Buffer {
 
         for i in self.op_cursor..s.op_cursor {
             let mut op = self.op_history[i];
-            op.do_op(self);
+            self.do_op(&mut op);
         }
 
         // CLEANUP: this should be done as an Opresult ?
@@ -1755,11 +1782,40 @@ impl Buffer {
         Opresult::Change(s.cursor)
     }
 
-    fn do_op(&mut self, mut op: Op) {
-        op.do_op(self);
+    fn do_single_op(&mut self, mut op: Op) {
+        self.do_op(&mut op);
         self.op_history.insert(self.op_cursor, op);
         self.op_cursor += 1;
     }
+
+    fn do_op(&mut self, op: &mut Op) {
+        match op.op_type {
+            Optype::Del => {
+                op.line = self.lines.remove(op.lineno);
+            }
+            Optype::Ins => {
+                self.lines.insert(op.lineno, op.line);
+            }
+            Optype::Rep => {
+                swap(&mut op.line, &mut self.lines[op.lineno]);
+            }
+        }
+    }
+
+    fn undo_op(&mut self, op: &mut Op) {
+        match op.op_type {
+            Optype::Del => {
+                self.lines.insert(op.lineno, op.line);
+            }
+            Optype::Ins => {
+                self.lines.remove(op.lineno);
+            }
+            Optype::Rep => {
+                swap(&mut op.line, &mut self.lines[op.lineno]);
+            }
+        };
+    }
+    // TODO: move back Op::do_op and Op::undo_op here
 }
 
 
@@ -1767,22 +1823,6 @@ impl Buffer {
 pub enum InsertMode {
     Insert,
     Replace,
-}
-
-
-fn file_load(filename: &str) -> Re<Vec<u8>> {
-    let fileinfo = fs::metadata(filename)?;
-    let size = fileinfo.len() as usize;
-
-    let mut buf = vec![0; size];
-    let mut f = fs::File::open(filename)?;
-
-    let nread = f.read(&mut buf)?;
-    if nread != size {
-        return er!("not enough bytes");
-    }
-
-    Ok(buf)
 }
 
 
@@ -1822,24 +1862,6 @@ enum Optype {
     Del,
     Ins,
     Rep,
-}
-
-impl Op {
-    fn do_op(&mut self, buffer: &mut Buffer) {
-        match self.op_type {
-            Optype::Del => self.line = buffer.lines.remove(self.lineno),
-            Optype::Ins => buffer.lines.insert(self.lineno, self.line),
-            Optype::Rep => swap(&mut self.line, &mut buffer.lines[self.lineno]),
-        }
-    }
-
-    fn undo_op(&mut self, buffer: &mut Buffer) {
-        match self.op_type {
-            Optype::Del => buffer.lines.insert(self.lineno, self.line),
-            Optype::Ins => { buffer.lines.remove(self.lineno); }
-            Optype::Rep => swap(&mut self.line, &mut buffer.lines[self.lineno]),
-        };
-    }
 }
 
 
