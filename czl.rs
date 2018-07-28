@@ -1325,6 +1325,7 @@ pub struct Drawinfo<'a> {
 mod text {
 
 
+use std;
 use std::cmp::min;
 use std::fs;
 use std::io::Write;
@@ -1396,11 +1397,11 @@ pub struct Buffer {
     lines:                  Vec<Range>,
     pub dirty:              bool,
 
+    opbuffer:                    OpBuffer,
     snapshots:              Vec<Snapshot>,
     snapshot_next:          usize,
-    // CLEANUP: should this be group together ?
-    op_history:             Vec<Op>,
-    op_cursor:              usize,
+
+    // TODO: should this track the current insert / command mode ?
 }
 
 pub struct BufferIter<'a> {
@@ -1468,8 +1469,11 @@ impl Buffer {
             dirty:              false,
             snapshots:          Vec::new(),
             snapshot_next:      0,
-            op_history:         Vec::new(),
-            op_cursor:          0,
+            opbuffer:           OpBuffer {
+                ops:                Vec::new(),
+                cursor:             0,
+                pending:            0,
+            }
         }
     }
 
@@ -1490,7 +1494,7 @@ impl Buffer {
     pub fn snapshot(&mut self, cursor: Pos) {
         let s = Snapshot {
             text_cursor:    self.text.len(),
-            op_cursor:      self.op_cursor,
+            op_cursor:      self.opbuffer.cursor,
             dirty:          self.dirty,
             cursor:         cursor,
         };
@@ -1543,7 +1547,7 @@ impl Buffer {
         let lineno = usize(p.y);
         check!(lineno < self.lines.len());
 
-        self.do_single_op(Op {
+        self.push_op(Op {
             lineno,
             line:           Range { start: 0, stop: 0 },
             op_type:        Optype::Del,
@@ -1559,8 +1563,8 @@ impl Buffer {
     pub fn line_new(&mut self, p: Pos) -> Opresult {
         let lineno = usize(p.y);
         let line = self.line_empty();
-        let op = Op { lineno, line, op_type:Optype::Ins };
-        self.do_single_op(op);
+
+        self.push_op(Op { lineno, line, op_type:Optype::Ins });
 
         Opresult::Change(p)
     }
@@ -1576,7 +1580,7 @@ impl Buffer {
 
         let line = range(start, start + line1.len() + line2.len());
 
-        self.do_single_op(Op {
+        self.push_op(Op {
             lineno:     lineno,
             line:       line,
             op_type:    Optype::Rep,
@@ -1590,12 +1594,12 @@ impl Buffer {
         let (colno, lineno) = p.usize();
         let (left, right) = self.line_get(lineno).cut(colno);
 
-        self.do_single_op(Op {
+        self.push_op(Op {
             lineno:     lineno,
             line:       left,
             op_type:    Optype::Rep,
         });
-        self.do_single_op(Op {
+        self.push_op(Op {
             lineno:     lineno + 1,
             line:       right,
             op_type:    Optype::Ins,
@@ -1622,8 +1626,7 @@ impl Buffer {
 
     pub fn prepare_insert(&mut self, lineno: usize) {
         let line = self.cloneline(lineno);
-        let op = Op { lineno, line, op_type: Optype::Rep };
-        self.do_single_op(op);
+        self.push_op(Op { lineno, line, op_type: Optype::Rep });
     }
 
     pub fn char_insert(&mut self, mode: InsertMode, p: Pos, c: char) -> Opresult {
@@ -1750,15 +1753,9 @@ impl Buffer {
         }
 
         let s = self.snapshots.pop().unwrap();
-        for i in (s.op_cursor..self.op_cursor).rev() {
-            let mut op = self.op_history[i];
-            self.undo_op(&mut op);
-        }
-
-        // CLEANUP: this should be done as an Opresult ??
-        self.op_cursor = s.op_cursor;
+        self.ops_undo(s.op_cursor);
+        self.dirty = s.dirty;
         // TODO: introduce text cursor and adjust it here
-        // TODO: introduce line cursor and adjust it here
         Opresult::Change(s.cursor)
     }
 
@@ -1769,53 +1766,85 @@ impl Buffer {
 
         let s = self.snapshots[self.snapshot_next];
 
-        for i in self.op_cursor..s.op_cursor {
-            let mut op = self.op_history[i];
-            self.do_op(&mut op);
-        }
+        self.ops_redo(s.op_cursor);
 
         // CLEANUP: this should be done as an Opresult ?
-        // TODO adjust text and line cursors
+        // TODO adjust text cursor
         self.dirty = s.dirty;
         self.snapshot_next += 1;
-        self.op_cursor = s.op_cursor;
         Opresult::Change(s.cursor)
     }
 
-    fn do_single_op(&mut self, mut op: Op) {
-        self.do_op(&mut op);
-        self.op_history.insert(self.op_cursor, op);
-        self.op_cursor += 1;
+    fn push_op(&mut self, op: Op) {
+        self.opbuffer.ops.insert(self.opbuffer.pending, op);
+        self.opbuffer.pending += 1;
     }
 
-    fn do_op(&mut self, op: &mut Op) {
-        match op.op_type {
-            Optype::Del => {
-                op.line = self.lines.remove(op.lineno);
+    fn pending_ops(&mut self) -> std::ops::Range<usize> {
+        (self.opbuffer.cursor..self.opbuffer.pending)
+    }
+
+    pub fn ops_do(&mut self) {
+        // 1) need to move the thing out first ...
+        // 2) or I can make an index range instead and only copy grab the op.op_type by value ...
+        for i in self.pending_ops() {
+            let op_type;
+            let lineno;
+            let line;
+            {
+                let op = self.opbuffer.ops[i];
+                op_type = op.op_type;
+                lineno = op.lineno;
+                line = op.line;
             }
-            Optype::Ins => {
-                self.lines.insert(op.lineno, op.line);
-            }
-            Optype::Rep => {
-                swap(&mut op.line, &mut self.lines[op.lineno]);
+            match op_type {
+                Optype::Del => {
+                    self.opbuffer.ops[i].line = line;
+                }
+                Optype::Ins => {
+                    self.lines.insert(lineno,line);
+                }
+                Optype::Rep => {
+                    swap(&mut self.opbuffer.ops[i].line, &mut self.lines[lineno]);
+                }
             }
         }
+        self.opbuffer.pending = self.opbuffer.cursor;
     }
 
-    fn undo_op(&mut self, op: &mut Op) {
-        match op.op_type {
-            Optype::Del => {
-                self.lines.insert(op.lineno, op.line);
+    fn ops_undo(&mut self, op_cursor_prev: usize) {
+        check!(op_cursor_prev <= self.opbuffer.cursor);
+        self.opbuffer.cursor = op_cursor_prev;
+        for i in self.pending_ops().rev() {
+            let op_type;
+            let lineno;
+            let line;
+            {
+                let op = self.opbuffer.ops[i];
+                op_type = op.op_type;
+                lineno = op.lineno;
+                line = op.line;
             }
-            Optype::Ins => {
-                self.lines.remove(op.lineno);
+            match op_type {
+                Optype::Del => {
+                    self.lines.insert(lineno, line);
+                }
+                Optype::Ins => {
+                    self.lines.remove(lineno);
+                }
+                Optype::Rep => {
+                    swap(&mut self.opbuffer.ops[i].line, &mut self.lines[lineno]);
+                }
             }
-            Optype::Rep => {
-                swap(&mut op.line, &mut self.lines[op.lineno]);
-            }
-        };
+        }
+        self.opbuffer.pending = op_cursor_prev;
     }
-    // TODO: move back Op::do_op and Op::undo_op here
+
+    fn ops_redo(&mut self, op_cursor_next: usize) {
+        check!(self.opbuffer.cursor <= op_cursor_next);
+        self.opbuffer.pending = op_cursor_next;
+        self.ops_do();
+    }
 }
 
 
@@ -1864,6 +1893,18 @@ enum Optype {
     Rep,
 }
 
+// A linear history of operations.
+// OpHistory has two cursors:
+//  - the current cursor represents the points of the last frame drawn
+//  - the pending cursor indicates which pending ops are yet to be executed.
+// When editing the buffer, pending ops are pushed in OpHistory and then batch executed.
+// An OpHistory snapshot is simply a copy of the current cursor
+#[derive(Debug, Clone)]
+struct OpBuffer {
+    ops:        Vec<Op>,
+    cursor:     usize,
+    pending:    usize,
+}
 
 } // mod text
 
@@ -2255,6 +2296,8 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
         Change(p) => {
             e.view.cursor = p;
             e.buffer.dirty = true;
+            e.buffer.ops_do();
+            // push snapshot
         }
         _ => (),
     }
