@@ -1952,21 +1952,12 @@ enum MovementMode {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
-    Command(Commandstate),
+    Exit,
+    Command,
     Insert(InsertMode),
     PendingInsert(InsertMode),
-    Exit,
 }
 
-
-// TODO: eliminate Commandstate and Insertstate and put the data inside the Mode?
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Commandstate {
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Insertstate {
-}
 
 // Left justified, fixed length strings.
 const MODE_COMMAND  : &'static str = "Command  ";
@@ -1977,12 +1968,12 @@ const MODE_PREPLACE : &'static str = "Replace? ";
 const MODE_EXIT     : &'static str = "Exit     ";
 
 impl Mode {
-    const default_command_state : Mode = Mode::Command(Commandstate { });
+    const default_command_state : Mode = Mode::Command;
 
     fn footer_color(self) -> Colorcell {
         use Mode::*;
         match self {
-            Command(_)                              => CONF.color_mode_command,
+            Command                                 => CONF.color_mode_command,
             Insert(InsertMode::Insert)              => CONF.color_mode_insert,
             Insert(InsertMode::Replace)             => CONF.color_mode_replace,
             PendingInsert(InsertMode::Insert)       => CONF.color_mode_insert,
@@ -1994,7 +1985,7 @@ impl Mode {
     fn name(self) -> &'static str {
         use Mode::*;
         match self {
-            Command(_)                              => MODE_COMMAND,
+            Command                                 => MODE_COMMAND,
             Insert(InsertMode::Insert)              => MODE_INSERT,
             Insert(InsertMode::Replace)             => MODE_REPLACE,
             PendingInsert(InsertMode::Insert)       => MODE_PINSERT,
@@ -2016,9 +2007,9 @@ impl Mode {
 
         use Mode::*;
         let next = match m {
-            Command(mut state) => {
+            Command => {
                 let op = Mode::input_to_command_op(i, e);
-                let next = state.do_command(op, e)?;
+                let next = do_command(op, e)?;
                 // should this instead be managed per operation in a more scoped way ?
                 e.view.update(&e.buffer);
                 next
@@ -2026,7 +2017,7 @@ impl Mode {
 
             Insert(mode) => {
                 let op = Mode::input_to_insert_op(mode, i, e);
-                Insertstate::do_insert(op, e)?
+                do_insert(op, e)?
             }
 
             PendingInsert(mode) => {
@@ -2304,16 +2295,15 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
 }
 
 /* COMMAND AND BUFFER MANIPULATION */
-impl Commandstate {
-    fn do_command(&mut self, op: CommandOp, e: &mut Editor) -> Re<Mode> {
+    fn do_command(op: CommandOp, e: &mut Editor) -> Re<Mode> {
         use CommandOp::*;
         use Mode::*;
         match op {
             BufferMove(m) =>
-                self.do_buffer_move(m, e),
+                do_buffer_move(m, e),
 
             BufferOp(p, op) =>
-                self.do_buffer_op(p, op, e),
+                do_buffer_op(p, op, e),
 
             Save(path) =>
                 e.buffer.to_file(&path)?,
@@ -2333,10 +2323,10 @@ impl Commandstate {
             Noop => (),
         }
 
-        Ok(Command(Commandstate { }))
+        Ok(Command)
     }
 
-    fn do_buffer_move(&mut self, op: MoveOp, e: &mut Editor) {
+    fn do_buffer_move(op: MoveOp, e: &mut Editor) {
         use MoveOp::*;
         match op {
             Movement(mvt) =>
@@ -2359,7 +2349,7 @@ impl Commandstate {
         }
     }
 
-    fn do_buffer_op(&mut self, p: Pos, op: BufferOpType, e: &mut Editor) {
+    fn do_buffer_op(p: Pos, op: BufferOpType, e: &mut Editor) {
         use BufferOpType::*;
         let opresult = match op {
             LineDel => {
@@ -2403,9 +2393,7 @@ impl Commandstate {
 
         update_buffer(opresult, e);
     }
-}
 
-impl Insertstate {
     fn do_insert(op: InsertOp, e: &mut Editor) -> Re<Mode> {
         use InsertOpType::*;
         use text::Opresult;
@@ -2461,7 +2449,6 @@ impl Insertstate {
 
         Ok(next_mode)
     }
-}
 
 impl Editor {
 
