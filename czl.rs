@@ -2077,14 +2077,14 @@ impl Mode {
 
     fn input_to_insert_op(mode: InsertMode, i: Input, e: &Editor) -> InsertOp {
         use Input::*;
-        use InsertOpType::*;
+        use BufferOpType::*;
         let optype = match i {
             Key(ESC) | EscZ                 => SwitchCommand,
             Key(ENTER)                      => LineBreak,
-            Key(TAB)                        => TabInsert,
-            Key(c) if c == DEL              => Backspace,
-            Key(c) if c == BACKSPACE        => Delete,
-            Key(c)                          => CharInsert(c),
+            Key(TAB)                        => InsertChar(TAB),
+            Key(DEL)                        => CharBackspace,
+            Key(BACKSPACE)                  => CharDelete,
+            Key(c)                          => InsertChar(c),
             _                               => Noop,
         };
 
@@ -2124,21 +2124,16 @@ enum BufferOpType {
     CharBackspace,
     Undo,
     Redo,
+    // Insert specific
+    InsertChar(char),
+    SwitchCommand,      // TODO: get rid of me !
+    Noop,               // TODO: get rid of me ? Or at least shortcut earlier
 }
 
-enum InsertOpType {
-    LineBreak,
-    TabInsert,
-    CharInsert(char),
-    Delete,
-    Backspace,
-    SwitchCommand,
-    Noop,
-}
-
+// TODO: fold into CommandOp
 struct InsertOp {
     cursor: Pos,
-    optype: InsertOpType,
+    optype: BufferOpType,
     mode:   InsertMode,
 }
 
@@ -2389,23 +2384,36 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
             Redo => {
                 e.buffer.redo()
             }
+
+            InsertChar(_) |
+            SwitchCommand |
+            Noop => {
+                Opresult::Noop
+            }
         };
 
         update_buffer(opresult, e);
     }
 
     fn do_insert(op: InsertOp, e: &mut Editor) -> Re<Mode> {
-        use InsertOpType::*;
+        use BufferOpType::*;
         use text::Opresult;
 
         let mut next_mode = Mode::Insert(op.mode);
 
         let opresult = match op.optype {
+            // unsupported for now
+            LineDel     |
+            LineNew     |
+            LineJoin    |
+            Undo        |
+            Redo        => Opresult::Noop,
+
             LineBreak => {
                 e.buffer.line_break(op.cursor)
             }
 
-            TabInsert => {
+            InsertChar(c) if c == TAB => {
                 let n = CONF.tab_expansion - op.cursor.x % CONF.tab_expansion;
                 let mut p = op.cursor;
                 for _ in 0..n {
@@ -2415,21 +2423,21 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
                 Opresult::Change(p)
             }
 
-            CharInsert(c) if !is_printable(c) => {
+            InsertChar(c) if !is_printable(c) => {
                 Opresult::Noop
             }
 
-            CharInsert(c) => {
+            InsertChar(c) => {
                 // TODO: check that raw text mutation: insert is always preceded by a snapshot
                 // and appropriate line copy
                 e.buffer.char_insert(op.mode, op.cursor, c)
             }
 
-            Delete => {
+            CharDelete => {
                 e.buffer.del(op.cursor)
             }
 
-            Backspace => {
+            CharBackspace => {
                 e.buffer.backspace(op.cursor)
             }
 
