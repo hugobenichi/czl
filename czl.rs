@@ -1336,6 +1336,13 @@ use util::*;
 use ioutil;
 
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InsertMode {
+    Insert,
+    Replace,
+}
+
+
 #[cfg(windows)]
 const LINE_ENDING: &'static [u8] = b"\r\n";
 #[cfg(not(windows))]
@@ -1848,13 +1855,6 @@ impl Buffer {
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum InsertMode {
-    Insert,
-    Replace,
-}
-
-
 /*
  * Undo management and operation management
  *  - store all operations as objects in to an append only vec
@@ -2017,7 +2017,7 @@ impl Mode {
 
             Insert(mode) => {
                 let op = Mode::input_to_insert_op(mode, i, e);
-                do_insert(op, e)?
+                do_insert(op.cursor, op.optype, op.mode.unwrap(), e)?
             }
 
             PendingInsert(mode) => {
@@ -2043,6 +2043,7 @@ impl Mode {
     fn input_to_command_op(i: Input, e: &Editor) -> CommandOp {
         use Input::*;
         use CommandOp::*;
+        use BufferOpType::*;
         match i {
             // TODO: more sophisticated cursor movement ...
             // TODO: handle mouse click
@@ -2055,15 +2056,15 @@ impl Mode {
             Key(CTRL_U) => BufferMove(MoveOp::PageUp),
             Key(CTRL_H) => BufferMove(MoveOp::FileStart),
             Key(CTRL_L) => BufferMove(MoveOp::FileEnd),
-            Key('o')    => BufferOp(e.view.cursor + pos(0,1),   BufferOpType::LineNew),
-            Key('O')    => BufferOp(e.view.cursor,              BufferOpType::LineNew),
-            Key('q')    => BufferOp(e.view.cursor,              BufferOpType::LineJoin),
-            Key(ENTER)  => BufferOp(e.view.cursor,              BufferOpType::LineBreak),
-            Key('d')    => BufferOp(e.view.cursor,              BufferOpType::LineDel),
-            Key('x')    => BufferOp(e.view.cursor,              BufferOpType::CharDelete),
-            Key(CTRL_X) => BufferOp(e.view.cursor,              BufferOpType::CharBackspace),
-            Key('u')    => BufferOp(e.view.cursor,              BufferOpType::Undo),
-            Key('r')    => BufferOp(e.view.cursor,              BufferOpType::Redo),
+            Key('o')    => BufferOp(bufferop(e.view.cursor + pos(0,1), LineNew)),
+            Key('O')    => BufferOp(bufferop(e.view.cursor,            LineNew)),
+            Key('q')    => BufferOp(bufferop(e.view.cursor,            LineJoin)),
+            Key(ENTER)  => BufferOp(bufferop(e.view.cursor,            LineBreak)),
+            Key('d')    => BufferOp(bufferop(e.view.cursor,            LineDel)),
+            Key('x')    => BufferOp(bufferop(e.view.cursor,            CharDelete)),
+            Key(CTRL_X) => BufferOp(bufferop(e.view.cursor,            CharBackspace)),
+            Key('u')    => BufferOp(bufferop(e.view.cursor,            Undo)),
+            Key('r')    => BufferOp(bufferop(e.view.cursor,            Redo)),
             Key('\t')   => SwitchInsert,
             Key(CTRL_R) => SwitchReplace,
             Key('s')    => Save(format!("{}.tmp", e.view.filepath)),
@@ -2071,11 +2072,11 @@ impl Mode {
             //Key('b')
             //            => panic!("BOOM !"),
             //            //=> return er!("BOOM !"),
-            _ => Noop,
+            _           => CommandOp::Noop,
         }
     }
 
-    fn input_to_insert_op(mode: InsertMode, i: Input, e: &Editor) -> InsertOp {
+    fn input_to_insert_op(mode: InsertMode, i: Input, e: &Editor) -> BufferOperation {
         use Input::*;
         use BufferOpType::*;
         let optype = match i {
@@ -2088,16 +2089,17 @@ impl Mode {
             _                               => Noop,
         };
 
-        InsertOp {
+        BufferOperation {
             cursor: e.view.cursor,
             optype,
-            mode,
+            mode: Some(mode),
         }
     }
 }
 
+
 enum CommandOp {
-    BufferOp(Pos, BufferOpType),
+    BufferOp(BufferOperation),
     BufferMove(MoveOp),
     Save(String),
     SwitchInsert,
@@ -2115,6 +2117,18 @@ enum MoveOp {
     FileEnd,
 }
 
+fn bufferop(cursor: Pos, optype: BufferOpType) -> BufferOperation {
+    BufferOperation { cursor, optype, mode: None }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BufferOperation {
+    cursor: Pos,
+    optype: BufferOpType,
+    mode:   Option<InsertMode>,
+}
+
+#[derive(Debug, Clone, Copy)]
 enum BufferOpType {
     LineDel,
     LineNew,
@@ -2128,13 +2142,6 @@ enum BufferOpType {
     InsertChar(char),
     SwitchCommand,      // TODO: get rid of me !
     Noop,               // TODO: get rid of me ? Or at least shortcut earlier
-}
-
-// TODO: fold into CommandOp
-struct InsertOp {
-    cursor: Pos,
-    optype: BufferOpType,
-    mode:   InsertMode,
 }
 
 // Point to a place inside a Buffer
@@ -2297,8 +2304,8 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
             BufferMove(m) =>
                 do_buffer_move(m, e),
 
-            BufferOp(p, op) =>
-                do_buffer_op(p, op, e),
+            BufferOp(BufferOperation { cursor, optype, mode: _ }) =>
+                do_buffer_op(cursor, optype, e),
 
             Save(path) =>
                 e.buffer.to_file(&path)?,
@@ -2395,13 +2402,13 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
         update_buffer(opresult, e);
     }
 
-    fn do_insert(op: InsertOp, e: &mut Editor) -> Re<Mode> {
+    fn do_insert(cursor: Pos, optype: BufferOpType, mode: InsertMode, e: &mut Editor) -> Re<Mode> {
         use BufferOpType::*;
         use text::Opresult;
 
-        let mut next_mode = Mode::Insert(op.mode);
+        let mut next_mode = Mode::Insert(mode);
 
-        let opresult = match op.optype {
+        let opresult = match optype {
             // unsupported for now
             LineDel     |
             LineNew     |
@@ -2410,14 +2417,14 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
             Redo        => Opresult::Noop,
 
             LineBreak => {
-                e.buffer.line_break(op.cursor)
+                e.buffer.line_break(cursor)
             }
 
             InsertChar(c) if c == TAB => {
-                let n = CONF.tab_expansion - op.cursor.x % CONF.tab_expansion;
-                let mut p = op.cursor;
+                let n = CONF.tab_expansion - cursor.x % CONF.tab_expansion;
+                let mut p = cursor;
                 for _ in 0..n {
-                    e.buffer.char_insert(op.mode, p, ' ');
+                    e.buffer.char_insert(mode, p, ' ');
                     p = p + pos(1,0);
                 }
                 Opresult::Change(p)
@@ -2430,15 +2437,15 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
             InsertChar(c) => {
                 // TODO: check that raw text mutation: insert is always preceded by a snapshot
                 // and appropriate line copy
-                e.buffer.char_insert(op.mode, op.cursor, c)
+                e.buffer.char_insert(mode, cursor, c)
             }
 
             CharDelete => {
-                e.buffer.del(op.cursor)
+                e.buffer.del(cursor)
             }
 
             CharBackspace => {
-                e.buffer.backspace(op.cursor)
+                e.buffer.backspace(cursor)
             }
 
             // TODO: add SwitchReplace / SwitchInsert
