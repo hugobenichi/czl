@@ -26,3 +26,7 @@ run: build
 
 clean:
 	rm -rf $(OUTDIR)
+
+
+gobuild:
+	go build *go
