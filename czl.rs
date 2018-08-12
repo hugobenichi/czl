@@ -1404,9 +1404,8 @@ pub struct Buffer {
     lines:                  Vec<Range>,
     pub dirty:              bool,
 
-    opbuffer:                    OpBuffer,
-    snapshots:              Vec<Snapshot>,
-    snapshot_next:          usize,
+    opbuffer:               OpBuffer,
+    snapshot_buffer:        SnapshotBuffer,
 
     // TODO: should this track the current insert / command mode ?
 }
@@ -1474,8 +1473,11 @@ impl Buffer {
             text,
             lines,
             dirty:              false,
-            snapshots:          Vec::new(),
-            snapshot_next:      0,
+            snapshot_buffer:    SnapshotBuffer {
+                snapshots:          Vec::new(),
+                pending:            false,
+                cursor:             0,
+            },
             opbuffer:           OpBuffer {
                 ops:                Vec::new(),
                 cursor:             0,
@@ -1498,16 +1500,13 @@ impl Buffer {
         Ok(())
     }
 
-    pub fn snapshot(&mut self, cursor: Pos) {
-        let s = Snapshot {
-            text_cursor:    self.text.len(),
-            op_cursor:      self.opbuffer.cursor,
-            dirty:          self.dirty,
-            cursor:         cursor,
-        };
-        self.snapshots.push(s);
-        self.snapshot_next += 1;
-        self.dirty = true;
+    pub fn snapshot_take(&mut self, cursor: Pos) {
+        let snapshot = Snapshot::take_snapshot(cursor, &self);
+        self.snapshot_buffer.push(snapshot);
+    }
+
+    pub fn snapshot_push(&mut self, s: Snapshot) {
+        self.snapshot_buffer.push(s);
     }
 
     pub fn char_at(&self, lineno: usize, colno: usize) -> char {
@@ -1754,32 +1753,40 @@ impl Buffer {
         r
     }
 
+    // TODO: reenable undo
+    // this should be a straightforward as bumping the ops cursor and rebatching ops
     pub fn undo(&mut self) -> Opresult {
-        if self.snapshots.is_empty() {
-            return Opresult::Noop
+        match self.snapshot_buffer.undo() {
+            Some(snapshot) => {
+//                self.ops_undo(s.op_cursor);
+//                self.dirty = s.dirty;
+//                // TODO: introduce text cursor and adjust it here
+//                Opresult::Change(s.cursor)
+                Opresult::Noop
+            }
+            None => {
+                Opresult::Noop
+            }
         }
-
-        let s = self.snapshots.pop().unwrap();
-        self.ops_undo(s.op_cursor);
-        self.dirty = s.dirty;
-        // TODO: introduce text cursor and adjust it here
-        Opresult::Change(s.cursor)
     }
 
+    // TODO: reenable redo
+    // this should be a straightforward as bumping the ops cursor and rebatching ops
     pub fn redo(&mut self) -> Opresult {
-        if self.snapshot_next == self.snapshots.len() {
-            return Opresult::Noop
+        match self.snapshot_buffer.redo() {
+            Some(snapshot) => {
+//                self.ops_redo(s.op_cursor);
+//                // CLEANUP: this should be done as an Opresult ?
+//                // TODO adjust text cursor
+//                self.dirty = s.dirty;
+//                self.snapshot_next += 1;
+//                Opresult::Change(s.cursor)
+                Opresult::Noop
+            }
+            None => {
+                Opresult::Noop
+            }
         }
-
-        let s = self.snapshots[self.snapshot_next];
-
-        self.ops_redo(s.op_cursor);
-
-        // CLEANUP: this should be done as an Opresult ?
-        // TODO adjust text cursor
-        self.dirty = s.dirty;
-        self.snapshot_next += 1;
-        Opresult::Change(s.cursor)
     }
 
     fn push_op(&mut self, op: Op) {
@@ -1863,12 +1870,87 @@ impl Buffer {
  *  - when undoing, I can truncate the line buffer and the text buffer
  */
 
+#[derive(Debug, Clone)]
+struct SnapshotBuffer {
+    snapshots: Vec<Snapshot>,
+    pending: bool,                  // revisit pending snapshots invariant
+    cursor: usize,                  // insert index of the next snapshots
+    // Need an index for tracking undo and redo
+}
+
+impl SnapshotBuffer {
+    // Ensure a new snapshot is staged.
+    fn push(&mut self, snapshot: Snapshot) {
+        if self.pending {
+            return;
+        }
+        if self.snapshots.len() == self.cursor {
+            self.snapshots.reserve(1);
+        }
+        self.snapshots[self.cursor] = snapshot;
+        self.pending = true;
+    }
+
+    // Save snapshot if staged, reset staged state.
+    fn finish_command(&mut self) {
+        if self.pending {
+            self.cursor += 1;
+        }
+        self.pending = false;
+    }
+
+    // Reset staged state, forgetting any staged snapshot.
+    fn reset(&mut self) {
+        self.pending = false;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cursor == 0
+    }
+
+    fn undo(&mut self) -> Option<Snapshot> {
+        check!(!self.pending);
+        if self.cursor == 0 {
+            return None
+        }
+
+        let snapshot = self.snapshots[self.cursor];
+        self.cursor -= 1;
+
+        Some(snapshot)
+    }
+
+    fn redo(&mut self) -> Option<Snapshot> {
+        check!(!self.pending);
+        if self.cursor == self.snapshots.len() {
+            return None
+        }
+
+        let snapshot = self.snapshots[self.cursor];
+        self.cursor -= 1;
+
+        Some(snapshot)
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
-struct Snapshot {
+pub struct Snapshot {
     text_cursor:    usize,
     op_cursor:      usize,
     dirty:          bool,
     cursor:         Pos,
+}
+
+impl Snapshot {
+    // CLEANUP: store cursor inside buffer
+    fn take_snapshot(cursor: Pos, buffer: &Buffer) -> Snapshot {
+        Snapshot {
+            text_cursor:    buffer.text.len(),
+            op_cursor:      buffer.opbuffer.cursor,
+            dirty:          buffer.dirty,
+            cursor:         cursor,
+        }
+    }
 }
 
 // A line operation on the buffer
@@ -2016,12 +2098,14 @@ impl Mode {
             }
 
             Insert(mode) => {
-                let op = Mode::input_to_insert_op(mode, i, e);
-                do_insert(op.cursor, op.optype, op.mode.unwrap(), e)?
+                let command = Mode::input_to_insert_op(mode, i, e);
+                do_buffer_command(command, e);
+                Insert(mode)
             }
 
             PendingInsert(mode) => {
-                e.buffer.snapshot(e.view.cursor);
+                // CHECKME: do I need an explicit snapshot here ?:w
+                //e.buffer.snapshot(e.view.cursor);
                 e.buffer.prepare_insert(usize(e.view.cursor.y));
                 let insertmode = Insert(mode);
                 Mode::process_input(insertmode, i, e)?
@@ -2056,15 +2140,15 @@ impl Mode {
             Key(CTRL_U) => BufferMove(MoveOp::PageUp),
             Key(CTRL_H) => BufferMove(MoveOp::FileStart),
             Key(CTRL_L) => BufferMove(MoveOp::FileEnd),
-            Key('o')    => BufferOp(bufferop(e.view.cursor + pos(0,1), LineNew)),
-            Key('O')    => BufferOp(bufferop(e.view.cursor,            LineNew)),
-            Key('q')    => BufferOp(bufferop(e.view.cursor,            LineJoin)),
-            Key(ENTER)  => BufferOp(bufferop(e.view.cursor,            LineBreak)),
-            Key('d')    => BufferOp(bufferop(e.view.cursor,            LineDel)),
-            Key('x')    => BufferOp(bufferop(e.view.cursor,            CharDelete)),
-            Key(CTRL_X) => BufferOp(bufferop(e.view.cursor,            CharBackspace)),
-            Key('u')    => BufferOp(bufferop(e.view.cursor,            Undo)),
-            Key('r')    => BufferOp(bufferop(e.view.cursor,            Redo)),
+            Key('o')    => BufferOp(buffercommand(e.view.cursor + pos(0,1), LineNew)),
+            Key('O')    => BufferOp(buffercommand(e.view.cursor,            LineNew)),
+            Key('q')    => BufferOp(buffercommand(e.view.cursor,            LineJoin)),
+            Key(ENTER)  => BufferOp(buffercommand(e.view.cursor,            LineBreak)),
+            Key('d')    => BufferOp(buffercommand(e.view.cursor,            LineDel)),
+            Key('x')    => BufferOp(buffercommand(e.view.cursor,            CharDelete)),
+            Key(CTRL_X) => BufferOp(buffercommand(e.view.cursor,            CharBackspace)),
+            Key('u')    => BufferOp(buffercommand(e.view.cursor,            Undo)),
+            Key('r')    => BufferOp(buffercommand(e.view.cursor,            Redo)),
             Key('\t')   => SwitchInsert,
             Key(CTRL_R) => SwitchReplace,
             Key('s')    => Save(format!("{}.tmp", e.view.filepath)),
@@ -2076,7 +2160,7 @@ impl Mode {
         }
     }
 
-    fn input_to_insert_op(mode: InsertMode, i: Input, e: &Editor) -> BufferOperation {
+    fn input_to_insert_op(mode: InsertMode, i: Input, e: &Editor) -> BufferCommand {
         use Input::*;
         use BufferOpType::*;
         let optype = match i {
@@ -2089,7 +2173,7 @@ impl Mode {
             _                               => Noop,
         };
 
-        BufferOperation {
+        BufferCommand {
             cursor: e.view.cursor,
             optype,
             mode: Some(mode),
@@ -2099,7 +2183,7 @@ impl Mode {
 
 
 enum CommandOp {
-    BufferOp(BufferOperation),
+    BufferOp(BufferCommand),
     BufferMove(MoveOp),
     Save(String),
     SwitchInsert,
@@ -2117,12 +2201,12 @@ enum MoveOp {
     FileEnd,
 }
 
-fn bufferop(cursor: Pos, optype: BufferOpType) -> BufferOperation {
-    BufferOperation { cursor, optype, mode: None }
+fn buffercommand(cursor: Pos, optype: BufferOpType) -> BufferCommand {
+    BufferCommand { cursor, optype, mode: None }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BufferOperation {
+struct BufferCommand {
     cursor: Pos,
     optype: BufferOpType,
     mode:   Option<InsertMode>,
@@ -2304,8 +2388,8 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
             BufferMove(m) =>
                 do_buffer_move(m, e),
 
-            BufferOp(BufferOperation { cursor, optype, mode: _ }) =>
-                do_buffer_op(cursor, optype, e),
+            BufferOp(command) =>
+                do_buffer_command(command, e),
 
             Save(path) =>
                 e.buffer.to_file(&path)?,
@@ -2351,118 +2435,76 @@ fn update_buffer(r: text::Opresult, e: &mut Editor) {
         }
     }
 
-    fn do_buffer_op(p: Pos, op: BufferOpType, e: &mut Editor) {
+    // TODO: move into buffer
+    // TODO: remote Editor from there and pass all the views instead
+    fn do_buffer_command(command: BufferCommand, e: &mut Editor) {
+        let cursor = command.cursor;
+
+        // FIXME: use Mode
+
+        // Or reuse a stashed snapshot when doing an Insert
+        // So what this should do is:
+        //  if no pending snapshot, take one: this indicates first step of Insert mode
+        let snapshot = e.buffer.snapshot_take(cursor);
         use BufferOpType::*;
-        let opresult = match op {
-            LineDel => {
-                e.buffer.snapshot(p);
-                e.buffer.line_del(p)
+        let opresult = match command.optype {
+            // Undo and Redo bypass the normal flow.
+            Undo                => {
+                e.buffer.undo();
+                return;
+            }
+            Redo                => {
+                e.buffer.redo();
+                return;
             }
 
-            LineNew => {
-                e.buffer.snapshot(p);
-                e.buffer.line_new(p)
-            }
-
-            LineJoin => {
-                e.buffer.snapshot(p);
-                e.buffer.line_join(p)
-            }
-
-            LineBreak => {
-                e.buffer.snapshot(p);
-                e.buffer.line_break(p)
-            }
-
-            CharDelete => {
-                e.buffer.snapshot(p);
-                e.buffer.del(p)
-            }
-
-            CharBackspace => {
-                e.buffer.snapshot(p);
-                e.buffer.backspace(p)
-            }
-
-            Undo => {
-                e.buffer.undo()
-            }
-
-            Redo => {
-                e.buffer.redo()
-            }
-
-            InsertChar(_) |
-            SwitchCommand |
-            Noop => {
-                Opresult::Noop
-            }
-        };
-
-        update_buffer(opresult, e);
-    }
-
-    fn do_insert(cursor: Pos, optype: BufferOpType, mode: InsertMode, e: &mut Editor) -> Re<Mode> {
-        use BufferOpType::*;
-        use text::Opresult;
-
-        let mut next_mode = Mode::Insert(mode);
-
-        let opresult = match optype {
-            // unsupported for now
-            LineDel     |
-            LineNew     |
-            LineJoin    |
-            Undo        |
-            Redo        => Opresult::Noop,
-
-            LineBreak => {
-                e.buffer.line_break(cursor)
-            }
+            LineDel             => e.buffer.line_del(cursor),
+            LineNew             => e.buffer.line_new(cursor),
+            LineJoin            => e.buffer.line_join(cursor),
+            LineBreak           => e.buffer.line_break(cursor),
+            CharDelete          => e.buffer.del(cursor),
+            CharBackspace       => e.buffer.backspace(cursor),
 
             InsertChar(c) if c == TAB => {
                 let n = CONF.tab_expansion - cursor.x % CONF.tab_expansion;
                 let mut p = cursor;
                 for _ in 0..n {
-                    e.buffer.char_insert(mode, p, ' ');
+                    e.buffer.char_insert(command.mode.unwrap(), p, ' ');
                     p = p + pos(1,0);
                 }
                 Opresult::Change(p)
             }
-
             InsertChar(c) if !is_printable(c) => {
                 Opresult::Noop
             }
-
             InsertChar(c) => {
                 // TODO: check that raw text mutation: insert is always preceded by a snapshot
                 // and appropriate line copy
-                e.buffer.char_insert(mode, cursor, c)
+                e.buffer.char_insert(command.mode.unwrap(), cursor, c)
             }
 
-            CharDelete => {
-                e.buffer.del(cursor)
-            }
-
-            CharBackspace => {
-                e.buffer.backspace(cursor)
-            }
-
-            // TODO: add SwitchReplace / SwitchInsert
-
-            SwitchCommand => {
-                next_mode = Mode::default_command_state;
-                Opresult::Noop
-            }
-
-            Noop => {
-                Opresult::Noop
-            }
+            SwitchCommand       |
+                // in insert mode, save stashed Snapshot and exit Insert mode
+            Noop                => Opresult::Noop
         };
 
-        update_buffer(opresult, e);
+        // FIXME
+        // use snapshot below
 
-        Ok(next_mode)
+        match opresult {
+            Opresult::Cursor(new_cursor) => {
+                e.view.cursor = new_cursor;
+            }
+            Opresult::Change(new_cursor) => {
+                e.view.cursor = new_cursor;
+                // FIXME: partially avoid this if in insert mode ?
+                e.buffer.dirty = true;
+                e.buffer.ops_do();
+                //e.buffer.snapshot_buffer.save() ??
+            }
+            Opresult::Noop => (),
+                // FIXME: undo the snapshot push ?
+        }
     }
 
 impl Editor {
