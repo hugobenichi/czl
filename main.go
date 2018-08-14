@@ -13,4 +13,9 @@ func main() {
 		panic(err)
 	}
 	defer restore()
+
+
+	fmt.Println(framebuffer.Termsize())
+
+	framebuffer.ReadOne()
 }
