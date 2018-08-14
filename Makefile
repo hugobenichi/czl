@@ -27,6 +27,11 @@ run: build
 clean:
 	rm -rf $(OUTDIR)
 
-
 gobuild:
-	go build *go
+	go build vec.go rec.go
+
+gomain:
+	GOBIN=${PWD}/build/ go install main.go
+
+gorun: gomain
+	./build/main

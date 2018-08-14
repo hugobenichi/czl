@@ -2,7 +2,12 @@ czl
 czl.rs~
 czl.rz~
 *.tmp
+
 build/
+
+# Go dependencies
+pkg/
+src/golang.org
 
 tags
 :w
