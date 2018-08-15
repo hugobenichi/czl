@@ -1,7 +1,7 @@
 package main
 
 import "fmt"
-
+import "os"
 import "framebuffer"
 
 func main() {
@@ -21,18 +21,31 @@ func main_loop() error {
 	defer restore()
 
 
-	fmt.Println(framebuffer.Termsize())
+	// Clear screen
+	os.Stdout.WriteString("\x1bc")
+	os.Stdout.Sync()
+
+	ch := framebuffer.GetInputChannel()
 
 	for {
-		b, err := framebuffer.ReadOne()
+		input := <-ch
 
 		switch {
-		case err != nil:
-			return err
-		case b == 3:
+		case input.Kind == framebuffer.Error:
+			return input.Err
+		case input.Char == framebuffer.CTRL_C:
 			return nil
+		case input.Kind == framebuffer.Char:
+			fmt.Println(input.Char)
+		case input.Kind == framebuffer.MouseClick:
+			fmt.Println("mouse click")
+		case input.Kind == framebuffer.MouseRelease:
+			fmt.Println("mouse release")
+		case input.Kind == framebuffer.Resize:
+			x, y := framebuffer.Termsize()
+			fmt.Println("resize: ", x, y)
 		default:
-			fmt.Println(b)
+			fmt.Println("unrecognized input", input)
 		}
 	}
 }
