@@ -1,13 +1,12 @@
 package czl
 
-
 type Vec struct {
 	X int
 	Y int
 }
 
 func V(x, y int) Vec {
-	return Vec { x, y }
+	return Vec{x, y}
 }
 
 func (v Vec) Add(w Vec) Vec {

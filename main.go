@@ -20,7 +20,6 @@ func main_loop() error {
 	}
 	defer restore()
 
-
 	// Clear screen
 	os.Stdout.WriteString("\x1bc")
 	os.Stdout.Sync()

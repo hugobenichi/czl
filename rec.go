@@ -6,7 +6,7 @@ type Rec struct {
 }
 
 func R(min, max Vec) Rec {
-	return Rec { min, max }
+	return Rec{min, max}
 }
 
 func (r Rec) Translate(v Vec) Rec {
