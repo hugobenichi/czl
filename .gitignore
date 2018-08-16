@@ -6,8 +6,11 @@ czl.rz~
 build/
 
 # Go dependencies
+bin/
 pkg/
 src/golang.org
+src/github.com
+src/honnef.co
 
 tags
 :w
