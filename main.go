@@ -1,8 +1,13 @@
 package main
 
-import "fmt"
-import "os"
-import "framebuffer"
+import (
+	"fmt"
+	"os"
+	"runtime"
+
+	"framebuffer"
+	tb "textbuffer"
+)
 
 func main() {
 	fmt.Println(framebuffer.Termsize())
@@ -23,6 +28,14 @@ func main_loop() error {
 	// Clear screen
 	os.Stdout.WriteString("\x1bc")
 	os.Stdout.Sync()
+
+	// Load File
+	_, filename, _, _ := runtime.Caller(1)
+	filebuffer, err := tb.Load(filename)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("file %v length: %v lines", filebuffer.Filename, filebuffer.Nline)
 
 	ch := framebuffer.GetInputChannel()
 
