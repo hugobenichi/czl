@@ -5,11 +5,14 @@ import (
 	"os"
 	"runtime"
 
+	"command"
 	"framebuffer"
 	tb "textbuffer"
 )
 
 func main() {
+	command.Init()
+
 	fmt.Println(framebuffer.Termsize())
 
 	err := main_loop()
