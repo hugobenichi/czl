@@ -1,5 +1,16 @@
 package textbuffer
 
+
+/*
+	TODOs:
+		- Load a file
+		- Safe a file -> need a line Writer or line iterator
+		- Implement history buffer for ops
+		- Implement do, undo, redo
+		- Define commands in Line mode
+		- Define move mode
+*/
+
 import (
 	"errors"
 	"io/ioutil"
@@ -12,51 +23,6 @@ type Filebuffer struct {
 
 	textbuffer []byte
 	firstline  *Line
-}
-
-type Line struct {
-	prev          *Line
-	next          *Line
-	textpieces    [][]byte
-	piece_offsets []int
-	len           int
-}
-
-func (line *Line) init(piece []byte) {
-	assert(line.textpieces == nil)
-	assert(line.piece_offsets == nil)
-
-	line.textpieces = [][]byte{piece}
-	line.piece_offsets = []int{1}
-	line.len = -1
-}
-
-func (line *Line) pieces() [][]byte {
-	npiece := len(line.piece_offsets)
-	assert(npiece > 0)
-
-	stop := line.piece_offsets[npiece-1]
-	start := 0
-	if npiece > 1 {
-		start = line.piece_offsets[npiece-2]
-	}
-
-	return line.textpieces[start:stop]
-}
-
-func (line *Line) Len() int {
-	if line.piece_offsets == nil {
-		return 0
-	}
-
-	if line.len < 0 {
-		line.len = 0
-		for _, piece := range line.pieces() {
-			line.len += utf8.RuneCount(piece)
-		}
-	}
-
-	return line.len
 }
 
 type Cursor struct {
@@ -85,6 +51,52 @@ func Load(filename string) (*Filebuffer, error) {
 }
 
 // Define ops scoped on one line, define ops scoped on multiple lines or filebuffer
+
+type Line struct {
+	prev          *Line
+	next          *Line
+	head					[]byte
+	tail					[][]byte
+	len           int
+}
+
+func (line *Line) init(piece []byte) {
+	assert(line.tail == nil)
+	assert(line.head == nil)
+	line.head = piece
+	line.len = -1
+}
+
+func (line *Line) Len() int {
+	if line.head == nil {
+		return 0
+	}
+
+	if line.len < 0 {
+		line.len = utf8.RuneCount(line.head)
+		for _, piece := range line.tail {
+			line.len += utf8.RuneCount(piece)
+		}
+	}
+
+	return line.len
+}
+
+
+
+type Opkind int
+
+const (
+	OpLineInsert Opkind = iota
+	OpLineDelete
+	OpLineEdit
+)
+
+type Op struct {
+	Kind Opkind
+	Upper  *Line
+	Second *Line
+}
 
 func assert(b bool) {
 	if !b {
