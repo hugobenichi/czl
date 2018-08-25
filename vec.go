@@ -15,8 +15,18 @@ func (v Vec) Add(w Vec) Vec {
 	return V(x, y)
 }
 
+func (v Vec) Sub(w Vec) Vec {
+	x := v.X - w.X
+	y := v.Y - w.Y
+	return V(x, y)
+}
+
+func (v Vec) Minus() Vec {
+	return V(-v.X, -v.Y)
+}
+
 func (v Vec) Translate(r Rec) Rec {
 	min := v.Add(r.Min)
 	max := v.Add(r.Max)
-	return R(min, max)
+	return Rec{min, max}
 }

@@ -29,9 +29,7 @@ clean:
 
 gobuild:
 	go build vec.go rec.go
-
-gomain:
 	GOBIN=${PWD}/build/ go install main.go
 
-gorun: gomain
+gorun: gobuild
 	./build/main
