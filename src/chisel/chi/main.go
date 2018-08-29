@@ -5,15 +5,13 @@ import (
 	"os"
 	"runtime"
 
-	"command"
-	"framebuffer"
-	tb "textbuffer"
+	chisel "chisel/core"
 )
 
 func main() {
-	command.Init()
+	chisel.InitCommands()
 
-	fmt.Println(framebuffer.Termsize())
+	fmt.Println(chisel.Termsize())
 
 	err := main_loop()
 	if err != nil {
@@ -22,7 +20,7 @@ func main() {
 }
 
 func main_loop() error {
-	restore, err := framebuffer.Term_setraw()
+	restore, err := chisel.Term_setraw()
 	if err != nil {
 		panic(err)
 	}
@@ -34,30 +32,30 @@ func main_loop() error {
 
 	// Load File
 	_, filename, _, _ := runtime.Caller(1)
-	filebuffer, err := tb.Load(filename)
+	filebuffer, err := chisel.Load(filename)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("file %v length: %v lines", filebuffer.Filename, filebuffer.Nline)
 
-	ch := framebuffer.GetInputChannel()
+	ch := chisel.GetInputChannel()
 
 	for {
 		input := <-ch
 
 		switch {
-		case input.Kind == framebuffer.Error:
+		case input.Kind == chisel.Error:
 			return input.Err
-		case input.Char == framebuffer.CTRL_C:
+		case input.Char == chisel.CTRL_C:
 			return nil
-		case input.Kind == framebuffer.Char:
+		case input.Kind == chisel.Char:
 			fmt.Println(input.Char)
-		case input.Kind == framebuffer.MouseClick:
+		case input.Kind == chisel.MouseClick:
 			fmt.Println("mouse click")
-		case input.Kind == framebuffer.MouseRelease:
+		case input.Kind == chisel.MouseRelease:
 			fmt.Println("mouse release")
-		case input.Kind == framebuffer.Resize:
-			x, y := framebuffer.Termsize()
+		case input.Kind == chisel.Resize:
+			x, y := chisel.Termsize()
 			fmt.Println("resize: ", x, y)
 		default:
 			fmt.Println("unrecognized input", input)

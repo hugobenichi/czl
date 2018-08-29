@@ -1,5 +1,4 @@
-package textbuffer
-
+package core
 
 /*
 	TODOs:
@@ -53,11 +52,11 @@ func Load(filename string) (*Filebuffer, error) {
 // Define ops scoped on one line, define ops scoped on multiple lines or filebuffer
 
 type Line struct {
-	prev          *Line
-	next          *Line
-	head					[]byte
-	tail					[][]byte
-	len           int
+	prev *Line
+	next *Line
+	head []byte
+	tail [][]byte
+	len  int
 }
 
 func (line *Line) init(piece []byte) {
@@ -82,8 +81,6 @@ func (line *Line) Len() int {
 	return line.len
 }
 
-
-
 type Opkind int
 
 const (
@@ -93,7 +90,7 @@ const (
 )
 
 type Op struct {
-	Kind Opkind
+	Kind   Opkind
 	Upper  *Line
 	Second *Line
 }

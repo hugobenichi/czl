@@ -28,8 +28,8 @@ clean:
 	rm -rf $(OUTDIR)
 
 gobuild:
-	go build vec.go rec.go
-	GOBIN=${PWD}/build/ go install main.go
+	#go build vec.go rec.go
+	GOBIN=${PWD}/build/ go install chi
 
 gorun: gobuild
 	./build/main

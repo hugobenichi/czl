@@ -1,4 +1,4 @@
-package czl
+package core
 
 type Vec struct {
 	X int

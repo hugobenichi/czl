@@ -1,19 +1,18 @@
-package command
+package core
 
 type LineCommand int
 
 const (
-		LineNoop LineCommand = iota // nothing
-		LineInsert // insert a new line at cursor position, shifting current line down
-		LineAppend // insert a new line after cursor position, shifting current line up
-		LineDel    // delete current cursor lines
-		LineBreak  // break line at cursor position
-		LineJoin	 // join current lines together
-		// These should be object + copy
-		LineCopy	 // copy current lines in buffer
-		LinePaste	 // copy current lines in buffer
+	LineNoop   LineCommand = iota // nothing
+	LineInsert                    // insert a new line at cursor position, shifting current line down
+	LineAppend                    // insert a new line after cursor position, shifting current line up
+	LineDel                       // delete current cursor lines
+	LineBreak                     // break line at cursor position
+	LineJoin                      // join current lines together
+	// These should be object + copy
+	LineCopy  // copy current lines in buffer
+	LinePaste // copy current lines in buffer
 )
-
 
 /*
 
@@ -30,8 +29,7 @@ action = cursor action | text action
 
 */
 
-
-func Init() {
+func InitCommands() {
 
 	// language for manipulating text
 
@@ -47,7 +45,7 @@ func Init() {
 	group("object").is("cursor", "line", "range", "block", "file", "tab", "window") // THINK: how to define multiple and composite objects ?
 }
 
-type Group struct {}
+type Group struct{}
 
 type SymbolKind int
 
@@ -61,12 +59,11 @@ const (
 type Symbol struct {
 	kind SymbolKind
 	name string
-	id int
+	id   int
 }
 
-
 var (
-	symbol_table = []Symbol {}
+	symbol_table   = []Symbol{}
 	symbol_by_name = make(map[string]Symbol)
 )
 
@@ -74,10 +71,10 @@ func symbol(name string) int {
 	if s, defined := symbol_by_name[name]; defined {
 		return s.id
 	}
-	s := Symbol {
+	s := Symbol{
 		kind: SymbolUnknown,
 		name: name,
-		id: len(symbol_table),
+		id:   len(symbol_table),
 	}
 	symbol_table = append(symbol_table, s)
 	return s.id
@@ -91,10 +88,10 @@ func group(name string) *Group {
 	}
 	s.kind = SymbolGroup
 	// TODO: store objects somewhere ! -> directly intol their Symbol thing
-	return &Group {}
+	return &Group{}
 }
 
-func (g *Group) is(names... string) {
+func (g *Group) is(names ...string) {
 	for _, n := range names {
 		// TODO store names to that group
 		symbol(n)

@@ -1,10 +1,16 @@
-package framebuffer
+package core
 
 import "golang.org/x/crypto/ssh/terminal"
 import "golang.org/x/sys/unix"
 import "os"
 import "syscall"
 import "os/signal"
+
+const (
+	// Does not work on OSX !
+	TCSETS = unix.TCSETS
+	TCGETS = unix.TCGETS
+)
 
 // #include <termios.h>
 // #include <sys/ioctl.h>
@@ -45,7 +51,7 @@ const (
 )
 
 func Term_setraw() (func(), error) {
-	original, err := unix.IoctlGetTermios(STDIN_FD, unix.TCGETS)
+	original, err := unix.IoctlGetTermios(STDIN_FD, TCGETS)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +92,7 @@ func Term_setraw() (func(), error) {
 	raw_term.Cc[unix.VMIN] = 0     // return each byte, or nothing when timeout
 	raw_term.Cc[unix.VTIME] = 100  //100			  // 100 * 100 ms timeout
 
-	if err := unix.IoctlSetTermios(STDIN_FD, unix.TCSETS, &raw_term); err != nil {
+	if err := unix.IoctlSetTermios(STDIN_FD, TCSETS, &raw_term); err != nil {
 		return nil, err
 	}
 
@@ -99,7 +105,7 @@ func Term_setraw() (func(), error) {
 		os.Stdout.Sync()
 
 		// ignore errors: too late anyway
-		unix.IoctlSetTermios(STDIN_FD, unix.TCSETS, original)
+		unix.IoctlSetTermios(STDIN_FD, TCSETS, original)
 	}, nil
 }
 
